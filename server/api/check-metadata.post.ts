@@ -16,7 +16,8 @@ export default defineEventHandler(async (event) => {
     const pairs = json.pairs || []
     
     if (pairs.length === 0) {
-      return { success: true, hasSocials: false, status: 'no_pair', overview: null }
+      // IMPORTANT: Return success=false but with a specific reason so UI knows it's not a crash
+      return { success: false, error: 'No pairs found on DexScreener' }
     }
 
     const mainPair = pairs[0]

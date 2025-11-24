@@ -238,8 +238,8 @@ export const useTrader = () => {
          }
       } else {
          if (!hasSocials) token.rejectReason = 'No Socials'
-         else if (!hasLiquidity) token.rejectReason = `Liq $${formatVal(token.liquidity)}`
-         else if (!hasVolume) token.rejectReason = `Vol $${formatVal(token.v24hUSD)}`
+         else if (!hasLiquidity) token.rejectReason = `Liq ${formatVal(token.liquidity)}`
+         else if (!hasVolume) token.rejectReason = `Vol ${formatVal(token.v24hUSD)}`
          rejectedTokens.value.unshift(token) 
       }
     } catch (e) {
