@@ -24,3 +24,4 @@ logs
 !.env.example
 
 data/trades.json
+data/trades2.json
