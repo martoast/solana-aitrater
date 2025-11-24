@@ -7,7 +7,7 @@ const activeTab = ref<'hunter' | 'positions' | 'wallet'>('hunter')
 const hunterMode = ref<'trending' | 'fresh'>('fresh')
 const balance = ref<number | null>(null)
 
-// Data
+// Data Lists
 const verifiedTokens = ref<any[]>([])
 const rejectedTokens = ref<any[]>([])
 const processingQueue = ref<any[]>([])
@@ -47,6 +47,34 @@ export const useTrader = () => {
   const { publicKey } = useWallet()
   const network = config.public.solanaNetwork as string
   
+  // DETECT ENVIRONMENT
+  // If we are on localhost, we prefer the API. On Netlify/Prod, we MUST use LocalStorage.
+  // We check if window exists to ensure client-side execution.
+  const isDev = import.meta.dev
+  
+  // --- STORAGE ADAPTER ---
+  
+  const saveToLocalStorage = () => {
+    if (import.meta.client) {
+      const db = {
+        activeTrades: activeTrades.value,
+        tradeHistory: tradeHistory.value
+      }
+      localStorage.setItem('ai_trader_db', JSON.stringify(db))
+    }
+  }
+
+  const loadFromLocalStorage = () => {
+    if (import.meta.client) {
+      const saved = localStorage.getItem('ai_trader_db')
+      if (saved) {
+        const db = JSON.parse(saved)
+        activeTrades.value = db.activeTrades || []
+        tradeHistory.value = db.tradeHistory || []
+      }
+    }
+  }
+
   // --- HELPERS ---
   const formatVal = (num: number) => {
     const n = Number(num)
@@ -149,20 +177,21 @@ export const useTrader = () => {
   const fetchPortfolio = async () => {
     loadingPortfolio.value = true
     try {
-      const res = await fetch('/api/portfolio')
-      const json = await res.json()
-      
-      activeTrades.value = json.trades.map((t: any) => {
-        const existing = activeTrades.value.find(old => old.id === t.id)
-        return {
+      if (isDev) {
+        // DEV MODE: Load from File DB
+        const res = await fetch('/api/portfolio')
+        const json = await res.json()
+        activeTrades.value = json.trades.map((t: any) => ({
           ...t,
-          currentPrice: existing?.currentPrice || null, 
-          pnl: existing?.pnl || 0,
-          pnlPercent: existing?.pnlPercent || 0,
-          currentValue: existing?.currentValue || t.amount
-        }
-      })
-      tradeHistory.value = json.history || []
+          currentPrice: null, pnl: 0, pnlPercent: 0, currentValue: t.amount
+        }))
+        tradeHistory.value = json.history || []
+      } else {
+        // PROD MODE: Load from LocalStorage
+        loadFromLocalStorage()
+      }
+      
+      // Always refresh live prices after loading data
       await refreshPortfolioPrices()
     } catch (e) { console.error(e) }
     finally { loadingPortfolio.value = false }
@@ -292,7 +321,6 @@ export const useTrader = () => {
     isUpdatingVerified.value = false
   }
 
-  // --- MANUAL AI CHECK (FIXED: UPDATES CARD DATA) ---
   const analyzeToken = async (token: any) => {
     processingId.value = token.address
     aiAnalysis.value = null
@@ -314,64 +342,27 @@ export const useTrader = () => {
         body: JSON.stringify({ token: tokenPayload, enriched: enrichedData })
       })
       const result = await aiRes.json()
-      
-      // --- UPDATE MASTER STATE HERE ---
+
       const verifiedIndex = verifiedTokens.value.findIndex(t => t.address === token.address)
       if (verifiedIndex !== -1) {
          verifiedTokens.value[verifiedIndex].aiScore = result.confidence
          verifiedTokens.value[verifiedIndex].aiDecision = result.decision
          verifiedTokens.value[verifiedIndex].aiReason = result.reason
-         
-         // Update market data if fresh from check-metadata
          if (data.overview) {
             verifiedTokens.value[verifiedIndex].price = safePrice
             verifiedTokens.value[verifiedIndex].liquidity = Number(data.overview.liquidity)
             verifiedTokens.value[verifiedIndex].v24hUSD = Number(data.overview.volume?.h24)
-            // CRITICAL: Update the 5m/1h change so the UI refreshes
             verifiedTokens.value[verifiedIndex].price24hChangePercent = Number(data.overview.priceChange?.h24)
             verifiedTokens.value[verifiedIndex].priceChange5m = Number(data.overview.priceChange?.m5)
             verifiedTokens.value[verifiedIndex].priceChange1h = Number(data.overview.priceChange?.h1)
          }
       }
-
+      
       aiAnalysis.value = { ...result, token: tokenPayload }
     } catch (e) { console.error(e) } 
     finally { processingId.value = null }
   }
 
-  // --- BATCH ANALYSIS (FIXED) ---
-  const runBatchAnalysis = async () => {
-    const tokensToAnalyze = verifiedTokens.value.filter(t => !t.aiScore)
-    if (tokensToAnalyze.length === 0) return
-
-    isBatchAnalyzing.value = true
-    try {
-      const res = await fetch('/api/batch-analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tokens: tokensToAnalyze })
-      })
-      const json = await res.json()
-
-      if (json.success && json.results) {
-        verifiedTokens.value.forEach(token => {
-          const result = json.results[token.address]
-          if (result) {
-            token.aiScore = result.score
-            token.aiTag = result.tag
-            token.aiReason = result.reason
-            // Map generic decision from tag
-            if (result.score >= 80) token.aiDecision = 'BUY'
-            else if (result.score <= 30) token.aiDecision = 'AVOID'
-            else token.aiDecision = 'WAIT'
-          }
-        })
-      }
-    } catch (e) { console.error(e) }
-    finally { isBatchAnalyzing.value = false }
-  }
-
-  // --- TRADING ACTIONS ---
   const askAiToManage = async (trade: any) => {
     processingId.value = trade.id
     manageAdvice.value = null
@@ -408,16 +399,39 @@ export const useTrader = () => {
     isBuying.value = true
     try {
       const tradeToken = { ...selectedToken.value, address: selectedToken.value.address }
-      const res = await fetch('/api/trade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'OPEN', token: tradeToken, amount: buyAmount.value })
-      })
-      const json = await res.json()
-      if(json.success) {
+      
+      if (isDev) {
+        // DEV MODE: Save to File API
+        const res = await fetch('/api/trade', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'OPEN', token: tradeToken, amount: buyAmount.value })
+        })
+        const json = await res.json()
+        if(json.success) {
+          showBuyModal.value = false
+          activeTab.value = 'positions'
+          fetchPortfolio() 
+        }
+      } else {
+        // PROD MODE: Save to LocalStorage
+        const newTrade = {
+            id: Math.random().toString(36).substring(7),
+            address: tradeToken.address,
+            symbol: tradeToken.symbol,
+            name: tradeToken.name,
+            logoURI: tradeToken.logoURI,
+            entryPrice: tradeToken.price,
+            amount: buyAmount.value, 
+            timestamp: Date.now(),
+            status: 'OPEN',
+            currentPrice: tradeToken.price,
+            pnl: 0, pnlPercent: 0, currentValue: buyAmount.value
+        }
+        activeTrades.value.push(newTrade)
+        saveToLocalStorage()
         showBuyModal.value = false
         activeTab.value = 'positions'
-        fetchPortfolio() 
       }
     } catch(e) { alert("Trade Failed") } 
     finally { isBuying.value = false }
@@ -425,16 +439,40 @@ export const useTrader = () => {
 
   const closePosition = async (trade: any) => {
      const currentPrice = trade.currentPrice || trade.entryPrice
-     const res = await fetch('/api/trade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'CLOSE', tradeId: trade.id, currentPrice: currentPrice }) 
-      })
-      const json = await res.json()
-      if(json.success) { 
-        manageAdvice.value = null
-        fetchPortfolio() 
-      }
+     
+     if (isDev) {
+        // DEV MODE: Close via API
+        const res = await fetch('/api/trade', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'CLOSE', tradeId: trade.id, currentPrice: currentPrice }) 
+        })
+        const json = await res.json()
+        if(json.success) { 
+            manageAdvice.value = null
+            fetchPortfolio() 
+        }
+     } else {
+        // PROD MODE: Close via LocalStorage
+        const tradeIndex = activeTrades.value.findIndex(t => t.id === trade.id)
+        if (tradeIndex !== -1) {
+            const closingTrade = activeTrades.value[tradeIndex]
+            const pnl = closingTrade.amount * ((currentPrice - closingTrade.entryPrice) / closingTrade.entryPrice)
+            
+            const historyEntry = {
+                ...closingTrade,
+                status: 'CLOSED',
+                exitPrice: currentPrice,
+                pnl: pnl,
+                closedAt: Date.now()
+            }
+            
+            activeTrades.value.splice(tradeIndex, 1)
+            tradeHistory.value.unshift(historyEntry)
+            saveToLocalStorage()
+            manageAdvice.value = null
+        }
+     }
   }
 
   const fetchBalance = async () => {
@@ -479,7 +517,7 @@ export const useTrader = () => {
     totalPortfolioValue, totalPnL, historyStats, isUpdatingVerified, isBatchAnalyzing,
     network,
     
-    fetchAndQueue, toggleSieve, refreshVerifiedPrices, runBatchAnalysis,
+    fetchAndQueue, toggleSieve, refreshVerifiedPrices,
     analyzeToken, openBuyModal, executeBuy, closePosition, askAiToManage,
     fetchBalance, handleAirdrop, fetchPortfolio, startPortfolioMonitor, stopPortfolioMonitor,
     
