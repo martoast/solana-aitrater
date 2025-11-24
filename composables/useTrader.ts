@@ -2,18 +2,24 @@ import { ref, computed, watch } from 'vue'
 import { Connection, clusterApiUrl, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import { useWallet } from 'solana-wallets-vue'
 
-// --- GLOBAL STATE ---
+// --- GLOBAL STATE (Singleton) ---
 const activeTab = ref<'hunter' | 'positions' | 'wallet'>('hunter')
 const hunterMode = ref<'trending' | 'fresh'>('fresh')
 const balance = ref<number | null>(null)
+
+// Data
 const verifiedTokens = ref<any[]>([])
 const rejectedTokens = ref<any[]>([])
 const processingQueue = ref<any[]>([])
 const activeTrades = ref<any[]>([])
 const tradeHistory = ref<any[]>([])
 const checkedCache = ref(new Set<string>())
+
+// Filters
 const minLiquidity = ref(5000)
 const minVolume = ref(1000)
+
+// UI/Loading States
 const loadingHunter = ref(false)
 const loadingPortfolio = ref(false)
 const isRefreshing = ref(false)
@@ -23,12 +29,16 @@ const isUpdatingVerified = ref(false)
 const isBatchAnalyzing = ref(false)
 const airdropping = ref(false)
 const processingId = ref<string | null>(null)
+
+// Modals State
 const aiAnalysis = ref<any>(null)
 const manageAdvice = ref<any>(null)
 const showBuyModal = ref(false)
 const selectedToken = ref<any>(null)
 const buyAmount = ref(10)
 const isBuying = ref(false)
+
+// Timers
 let scanTimer: any = null
 let portfolioTimer: any = null
 
@@ -37,6 +47,7 @@ export const useTrader = () => {
   const { publicKey } = useWallet()
   const network = config.public.solanaNetwork as string
   
+  // --- HELPERS ---
   const formatVal = (num: number) => {
     const n = Number(num)
     if (!n || isNaN(n)) return '$0'
@@ -63,10 +74,13 @@ export const useTrader = () => {
 
   const getExplorerLink = (address: string) => `https://birdeye.so/token/${address}?chain=solana`
 
+  // --- COMPUTED ---
   const totalPortfolioValue = computed(() => {
     let total = 0
     activeTrades.value.forEach(t => {
-      const currentVal = t.currentPrice ? (t.amount / t.entryPrice) * t.currentPrice : t.amount
+      const currentVal = t.currentPrice 
+        ? (t.amount / t.entryPrice) * t.currentPrice 
+        : t.amount
       total += currentVal
     })
     return total
@@ -90,6 +104,7 @@ export const useTrader = () => {
     return { realizedPnL, winRate, avgReturn: totalRoi / closed.length, totalTrades: closed.length }
   })
 
+  // --- API ACTIONS ---
   const fetchBatchPrices = async (addresses: string[]) => {
     if (addresses.length === 0) return {}
     const chunkSize = 30
@@ -109,6 +124,7 @@ export const useTrader = () => {
     return combinedData
   }
 
+  // --- PORTFOLIO LOGIC ---
   const refreshPortfolioPrices = async () => {
     if (activeTrades.value.length === 0) return
     isRefreshing.value = true
@@ -135,6 +151,7 @@ export const useTrader = () => {
     try {
       const res = await fetch('/api/portfolio')
       const json = await res.json()
+      
       activeTrades.value = json.trades.map((t: any) => {
         const existing = activeTrades.value.find(old => old.id === t.id)
         return {
@@ -161,6 +178,7 @@ export const useTrader = () => {
     if (portfolioTimer) clearInterval(portfolioTimer)
   }
 
+  // --- HUNTER / SIEVE LOGIC ---
   const fetchAndQueue = async () => {
     loadingHunter.value = true
     verifiedTokens.value = []
@@ -227,9 +245,11 @@ export const useTrader = () => {
             body: JSON.stringify({ token: tokenPayload, enriched: enrichedData })
          })
          const aiResult = await aiRes.json()
+
          token.aiScore = aiResult.confidence
          token.aiDecision = aiResult.decision
          token.aiReason = aiResult.reason
+
          if (aiResult.decision === 'AVOID') {
             token.rejectReason = `AI Reject: ${aiResult.reason.slice(0, 30)}...`
             rejectedTokens.value.unshift(token)
@@ -272,7 +292,7 @@ export const useTrader = () => {
     isUpdatingVerified.value = false
   }
 
-  // --- UPDATED: MANUAL AI CHECK WITH STATE UPDATE ---
+  // --- MANUAL AI CHECK (FIXED: UPDATES CARD DATA) ---
   const analyzeToken = async (token: any) => {
     processingId.value = token.address
     aiAnalysis.value = null
@@ -283,6 +303,7 @@ export const useTrader = () => {
         body: JSON.stringify({ address: token.address })
       })
       const data = await res.json()
+      
       const safePrice = Number(data.overview?.price || token.price)
       const tokenPayload = { ...token, price: isNaN(safePrice) ? 0.000001 : safePrice }
       const enrichedData = { data: data.overview, overview: { extensions: token.socials } }
@@ -293,27 +314,64 @@ export const useTrader = () => {
         body: JSON.stringify({ token: tokenPayload, enriched: enrichedData })
       })
       const result = await aiRes.json()
-
-      // --- UPDATE MASTER STATE ---
+      
+      // --- UPDATE MASTER STATE HERE ---
       const verifiedIndex = verifiedTokens.value.findIndex(t => t.address === token.address)
       if (verifiedIndex !== -1) {
          verifiedTokens.value[verifiedIndex].aiScore = result.confidence
          verifiedTokens.value[verifiedIndex].aiDecision = result.decision
          verifiedTokens.value[verifiedIndex].aiReason = result.reason
          
-         // Update market data if fresh
+         // Update market data if fresh from check-metadata
          if (data.overview) {
             verifiedTokens.value[verifiedIndex].price = safePrice
             verifiedTokens.value[verifiedIndex].liquidity = Number(data.overview.liquidity)
             verifiedTokens.value[verifiedIndex].v24hUSD = Number(data.overview.volume?.h24)
+            // CRITICAL: Update the 5m/1h change so the UI refreshes
+            verifiedTokens.value[verifiedIndex].price24hChangePercent = Number(data.overview.priceChange?.h24)
+            verifiedTokens.value[verifiedIndex].priceChange5m = Number(data.overview.priceChange?.m5)
+            verifiedTokens.value[verifiedIndex].priceChange1h = Number(data.overview.priceChange?.h1)
          }
       }
-      
+
       aiAnalysis.value = { ...result, token: tokenPayload }
     } catch (e) { console.error(e) } 
     finally { processingId.value = null }
   }
 
+  // --- BATCH ANALYSIS (FIXED) ---
+  const runBatchAnalysis = async () => {
+    const tokensToAnalyze = verifiedTokens.value.filter(t => !t.aiScore)
+    if (tokensToAnalyze.length === 0) return
+
+    isBatchAnalyzing.value = true
+    try {
+      const res = await fetch('/api/batch-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tokens: tokensToAnalyze })
+      })
+      const json = await res.json()
+
+      if (json.success && json.results) {
+        verifiedTokens.value.forEach(token => {
+          const result = json.results[token.address]
+          if (result) {
+            token.aiScore = result.score
+            token.aiTag = result.tag
+            token.aiReason = result.reason
+            // Map generic decision from tag
+            if (result.score >= 80) token.aiDecision = 'BUY'
+            else if (result.score <= 30) token.aiDecision = 'AVOID'
+            else token.aiDecision = 'WAIT'
+          }
+        })
+      }
+    } catch (e) { console.error(e) }
+    finally { isBatchAnalyzing.value = false }
+  }
+
+  // --- TRADING ACTIONS ---
   const askAiToManage = async (trade: any) => {
     processingId.value = trade.id
     manageAdvice.value = null
@@ -421,7 +479,7 @@ export const useTrader = () => {
     totalPortfolioValue, totalPnL, historyStats, isUpdatingVerified, isBatchAnalyzing,
     network,
     
-    fetchAndQueue, toggleSieve, refreshVerifiedPrices,
+    fetchAndQueue, toggleSieve, refreshVerifiedPrices, runBatchAnalysis,
     analyzeToken, openBuyModal, executeBuy, closePosition, askAiToManage,
     fetchBalance, handleAirdrop, fetchPortfolio, startPortfolioMonitor, stopPortfolioMonitor,
     
