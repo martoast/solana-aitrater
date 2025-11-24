@@ -40,13 +40,14 @@ export default defineEventHandler(async (event) => {
       },
       logoURI: mainPair.baseToken?.logoURI || null,
       
-      // UPDATED: Include Txns for AI Analysis
+      // UPDATED: Include Txns for AI Analysis so we don't need another API call
       overview: {
         price: mainPair.priceUsd,
         liquidity: mainPair.liquidity?.usd,
         fdv: mainPair.fdv,
         volume: mainPair.volume, // { h24, h6, h1, m5 }
         priceChange: mainPair.priceChange, // { h24, h6, h1, m5 }
+        // Flatten txns for easier AI consumption
         buys: mainPair.txns?.h1?.buys || 0,
         sells: mainPair.txns?.h1?.sells || 0
       }

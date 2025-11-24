@@ -1,25 +1,19 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { Connection, clusterApiUrl, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import { useWallet } from 'solana-wallets-vue'
 
-// --- GLOBAL STATE (Singleton) ---
+// --- GLOBAL STATE ---
 const activeTab = ref<'hunter' | 'positions' | 'wallet'>('hunter')
 const hunterMode = ref<'trending' | 'fresh'>('fresh')
 const balance = ref<number | null>(null)
-
-// Data
 const verifiedTokens = ref<any[]>([])
 const rejectedTokens = ref<any[]>([])
 const processingQueue = ref<any[]>([])
 const activeTrades = ref<any[]>([])
 const tradeHistory = ref<any[]>([])
 const checkedCache = ref(new Set<string>())
-
-// Filters
 const minLiquidity = ref(5000)
 const minVolume = ref(1000)
-
-// UI/Loading
 const loadingHunter = ref(false)
 const loadingPortfolio = ref(false)
 const isRefreshing = ref(false)
@@ -29,16 +23,12 @@ const isUpdatingVerified = ref(false)
 const isBatchAnalyzing = ref(false)
 const airdropping = ref(false)
 const processingId = ref<string | null>(null)
-
-// Modals State
 const aiAnalysis = ref<any>(null)
 const manageAdvice = ref<any>(null)
 const showBuyModal = ref(false)
 const selectedToken = ref<any>(null)
 const buyAmount = ref(10)
 const isBuying = ref(false)
-
-// Timers
 let scanTimer: any = null
 let portfolioTimer: any = null
 
@@ -47,7 +37,6 @@ export const useTrader = () => {
   const { publicKey } = useWallet()
   const network = config.public.solanaNetwork as string
   
-  // --- HELPERS ---
   const formatVal = (num: number) => {
     const n = Number(num)
     if (!n || isNaN(n)) return '$0'
@@ -56,9 +45,9 @@ export const useTrader = () => {
     return `$${Math.floor(n).toLocaleString()}`
   }
 
-  const formatPrice = (num: any) => {
+  const formatPrice = (num: number | string) => {
     const n = Number(num)
-    if (isNaN(n) || n === 0) return '0.000000'
+    if (!n || isNaN(n)) return '0.000000'
     return n < 0.01 ? n.toFixed(8) : n.toFixed(4)
   }
 
@@ -74,13 +63,10 @@ export const useTrader = () => {
 
   const getExplorerLink = (address: string) => `https://birdeye.so/token/${address}?chain=solana`
 
-  // --- COMPUTED ---
   const totalPortfolioValue = computed(() => {
     let total = 0
     activeTrades.value.forEach(t => {
-      const currentVal = t.currentPrice 
-        ? (t.amount / t.entryPrice) * t.currentPrice 
-        : t.amount
+      const currentVal = t.currentPrice ? (t.amount / t.entryPrice) * t.currentPrice : t.amount
       total += currentVal
     })
     return total
@@ -104,7 +90,6 @@ export const useTrader = () => {
     return { realizedPnL, winRate, avgReturn: totalRoi / closed.length, totalTrades: closed.length }
   })
 
-  // --- API ACTIONS ---
   const fetchBatchPrices = async (addresses: string[]) => {
     if (addresses.length === 0) return {}
     const chunkSize = 30
@@ -124,7 +109,6 @@ export const useTrader = () => {
     return combinedData
   }
 
-  // --- PORTFOLIO LOGIC ---
   const refreshPortfolioPrices = async () => {
     if (activeTrades.value.length === 0) return
     isRefreshing.value = true
@@ -151,7 +135,6 @@ export const useTrader = () => {
     try {
       const res = await fetch('/api/portfolio')
       const json = await res.json()
-      
       activeTrades.value = json.trades.map((t: any) => {
         const existing = activeTrades.value.find(old => old.id === t.id)
         return {
@@ -178,7 +161,6 @@ export const useTrader = () => {
     if (portfolioTimer) clearInterval(portfolioTimer)
   }
 
-  // --- HUNTER LOGIC ---
   const fetchAndQueue = async () => {
     loadingHunter.value = true
     verifiedTokens.value = []
@@ -216,12 +198,12 @@ export const useTrader = () => {
       const data = await res.json()
       
       if (data.success && data.overview) {
-         token.liquidity = Number(data.overview.liquidity || 0)
-         token.v24hUSD = Number(data.overview.volume?.h24 || 0)
-         token.price24hChangePercent = Number(data.overview.priceChange?.h24 || 0)
-         token.priceChange5m = Number(data.overview.priceChange?.m5 || 0)
-         token.priceChange1h = Number(data.overview.priceChange?.h1 || 0)
-         token.price = Number(data.overview.price || 0)
+         token.liquidity = parseFloat(data.overview.liquidity || 0)
+         token.v24hUSD = parseFloat(data.overview.volume?.h24 || 0)
+         token.price24hChangePercent = parseFloat(data.overview.priceChange?.h24 || 0)
+         token.priceChange5m = parseFloat(data.overview.priceChange?.m5 || 0)
+         token.priceChange1h = parseFloat(data.overview.priceChange?.h1 || 0)
+         token.price = parseFloat(data.overview.price || 0)
          
          token.socials = {
            website: token.prefilledSocials?.website || data.socials?.website,
@@ -249,7 +231,7 @@ export const useTrader = () => {
          token.aiDecision = aiResult.decision
          token.aiReason = aiResult.reason
          if (aiResult.decision === 'AVOID') {
-            token.rejectReason = `AI: ${aiResult.reason.slice(0, 25)}...`
+            token.rejectReason = `AI Reject: ${aiResult.reason.slice(0, 30)}...`
             rejectedTokens.value.unshift(token)
          } else {
             verifiedTokens.value.unshift(token) 
@@ -290,7 +272,7 @@ export const useTrader = () => {
     isUpdatingVerified.value = false
   }
 
-  // --- AI / MODALS ---
+  // --- UPDATED: MANUAL AI CHECK WITH STATE UPDATE ---
   const analyzeToken = async (token: any) => {
     processingId.value = token.address
     aiAnalysis.value = null
@@ -301,14 +283,32 @@ export const useTrader = () => {
         body: JSON.stringify({ address: token.address })
       })
       const data = await res.json()
-      const tokenPayload = { ...token, price: Number(data.overview?.price || token.price) }
+      const safePrice = Number(data.overview?.price || token.price)
+      const tokenPayload = { ...token, price: isNaN(safePrice) ? 0.000001 : safePrice }
       const enrichedData = { data: data.overview, overview: { extensions: token.socials } }
+
       const aiRes = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: tokenPayload, enriched: enrichedData })
       })
       const result = await aiRes.json()
+
+      // --- UPDATE MASTER STATE ---
+      const verifiedIndex = verifiedTokens.value.findIndex(t => t.address === token.address)
+      if (verifiedIndex !== -1) {
+         verifiedTokens.value[verifiedIndex].aiScore = result.confidence
+         verifiedTokens.value[verifiedIndex].aiDecision = result.decision
+         verifiedTokens.value[verifiedIndex].aiReason = result.reason
+         
+         // Update market data if fresh
+         if (data.overview) {
+            verifiedTokens.value[verifiedIndex].price = safePrice
+            verifiedTokens.value[verifiedIndex].liquidity = Number(data.overview.liquidity)
+            verifiedTokens.value[verifiedIndex].v24hUSD = Number(data.overview.volume?.h24)
+         }
+      }
+      
       aiAnalysis.value = { ...result, token: tokenPayload }
     } catch (e) { console.error(e) } 
     finally { processingId.value = null }
@@ -359,7 +359,7 @@ export const useTrader = () => {
       if(json.success) {
         showBuyModal.value = false
         activeTab.value = 'positions'
-        // NOTE: We don't call fetchPortfolio here directly, we let the component lifecycle handle it
+        fetchPortfolio() 
       }
     } catch(e) { alert("Trade Failed") } 
     finally { isBuying.value = false }
@@ -379,7 +379,6 @@ export const useTrader = () => {
       }
   }
 
-  // --- WALLET ---
   const fetchBalance = async () => {
     if (!publicKey.value) return
     try {
@@ -407,7 +406,11 @@ export const useTrader = () => {
     finally { airdropping.value = false }
   }
 
-  // NOTE: Removed the watchers from here. Components will manage their own data fetching.
+  watch(activeTab, (newTab) => {
+    if (newTab === 'positions') startPortfolioMonitor()
+    else stopPortfolioMonitor()
+    if (newTab === 'wallet') fetchBalance()
+  })
 
   return {
     activeTab, hunterMode, balance, verifiedTokens, rejectedTokens, 
