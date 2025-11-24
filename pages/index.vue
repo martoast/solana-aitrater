@@ -1,16 +1,14 @@
+<!-- pages/index.vue -->
 <script setup lang="ts">
 import { Buffer } from 'buffer'
 globalThis.Buffer = Buffer
 
-import { PhantomWalletAdapter, SolflareWalletAdapter } from '@solana/wallet-adapter-phantom'
+import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom'
 import { initWallet } from 'solana-wallets-vue'
 import 'solana-wallets-vue/styles.css'
 
-// Init Wallet
 const walletOptions = {
-  wallets: [
-    new PhantomWalletAdapter(),
-  ],
+  wallets: [ new PhantomWalletAdapter() ],
   autoConnect: true,
 }
 initWallet(walletOptions)
