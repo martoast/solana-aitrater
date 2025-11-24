@@ -1,6 +1,5 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
-  ssr: false, // Client-side app (SPA)
   devtools: { enabled: true },
   modules: [
     '@nuxtjs/tailwindcss'
