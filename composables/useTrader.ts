@@ -3,11 +3,12 @@ import { Connection, clusterApiUrl, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import { useWallet } from 'solana-wallets-vue'
 
 // --- GLOBAL STATE (Singleton) ---
+// Holds state across components so tabs don't reset
 const activeTab = ref<'hunter' | 'positions' | 'wallet'>('hunter')
 const hunterMode = ref<'trending' | 'fresh'>('fresh')
 const balance = ref<number | null>(null)
 
-// Data
+// Data Lists
 const verifiedTokens = ref<any[]>([])
 const rejectedTokens = ref<any[]>([])
 const processingQueue = ref<any[]>([])
@@ -19,17 +20,18 @@ const checkedCache = ref(new Set<string>())
 const minLiquidity = ref(5000)
 const minVolume = ref(1000)
 
-// UI/Loading
+// UI/Loading States
 const loadingHunter = ref(false)
 const loadingPortfolio = ref(false)
 const isRefreshing = ref(false)
 const isSieveRunning = ref(false)
 const currentChecking = ref<string>('')
 const isUpdatingVerified = ref(false)
+const isBatchAnalyzing = ref(false) // <--- Batch AI State
 const airdropping = ref(false)
 const processingId = ref<string | null>(null)
 
-// Modals
+// Modals State
 const aiAnalysis = ref<any>(null)
 const manageAdvice = ref<any>(null)
 const showBuyModal = ref(false)
@@ -66,7 +68,7 @@ export const useTrader = () => {
 
   const getExplorerLink = (address: string) => `https://birdeye.so/token/${address}?chain=solana`
 
-  // --- COMPUTED ---
+  // --- COMPUTED METRICS ---
   const totalPortfolioValue = computed(() => {
     let total = 0
     activeTrades.value.forEach(t => {
@@ -116,6 +118,7 @@ export const useTrader = () => {
     return combinedData
   }
 
+  // --- HUNTER / SIEVE LOGIC ---
   const fetchAndQueue = async () => {
     loadingHunter.value = true
     verifiedTokens.value = []
@@ -155,6 +158,8 @@ export const useTrader = () => {
       if (data.success && data.overview) {
          token.liquidity = parseFloat(data.overview.liquidity || token.liquidity || 0)
          token.v24hUSD = parseFloat(data.overview.volume?.h24 || 0)
+         token.priceChange5m = parseFloat(data.overview.priceChange?.m5 || 0)
+         token.priceChange1h = parseFloat(data.overview.priceChange?.h1 || 0)
          token.price24hChangePercent = parseFloat(data.overview.priceChange?.h24 || 0)
          token.price = parseFloat(data.overview.price || token.price || 0)
          
@@ -211,7 +216,7 @@ export const useTrader = () => {
     isUpdatingVerified.value = false
   }
 
-  // --- AI & TRADING ---
+  // --- AI ANALYSIS ---
   const analyzeToken = async (token: any) => {
     processingId.value = token.address
     aiAnalysis.value = null
@@ -233,6 +238,34 @@ export const useTrader = () => {
       aiAnalysis.value = { ...result, token: tokenPayload }
     } catch (e) { console.error(e) } 
     finally { processingId.value = null }
+  }
+
+  const runBatchAnalysis = async () => {
+    // Only analyze tokens that haven't been scored yet
+    const tokensToAnalyze = verifiedTokens.value.filter(t => !t.aiScore)
+    if (tokensToAnalyze.length === 0) return
+
+    isBatchAnalyzing.value = true
+    try {
+      const res = await fetch('/api/batch-analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tokens: tokensToAnalyze })
+      })
+      const json = await res.json()
+
+      if (json.success && json.results) {
+        verifiedTokens.value.forEach(token => {
+          const result = json.results[token.address]
+          if (result) {
+            token.aiScore = result.score
+            token.aiTag = result.tag
+            token.aiReason = result.reason
+          }
+        })
+      }
+    } catch (e) { console.error(e) }
+    finally { isBatchAnalyzing.value = false }
   }
 
   const askAiToManage = async (trade: any) => {
@@ -299,14 +332,12 @@ export const useTrader = () => {
     finally { loadingPortfolio.value = false }
   }
 
-  // --- BUY EXECUTION ---
+  // --- TRADING EXECUTION ---
   const openBuyModal = (token: any) => {
     if (!token.price) token.price = 0.000001; 
     selectedToken.value = token
     showBuyModal.value = true
-    
-    // UX FIX: Close AI Analysis if it's open so we transition cleanly to the Buy Modal
-    aiAnalysis.value = null
+    aiAnalysis.value = null // Close AI modal if open
   }
 
   const executeBuy = async () => {
@@ -371,7 +402,7 @@ export const useTrader = () => {
     finally { airdropping.value = false }
   }
 
-  // --- WATCHERS & TIMERS ---
+  // --- TIMERS ---
   const startPortfolioMonitor = () => {
     fetchPortfolio()
     if (portfolioTimer) clearInterval(portfolioTimer)
@@ -382,6 +413,7 @@ export const useTrader = () => {
     if (portfolioTimer) clearInterval(portfolioTimer)
   }
 
+  // Watchers
   watch(activeTab, (newTab) => {
     if (newTab === 'positions') startPortfolioMonitor()
     else stopPortfolioMonitor()
@@ -395,11 +427,11 @@ export const useTrader = () => {
     currentChecking, minLiquidity, minVolume, loadingHunter, 
     loadingPortfolio, isRefreshing, airdropping, processingId, 
     aiAnalysis, manageAdvice, showBuyModal, buyAmount, selectedToken, isBuying,
-    totalPortfolioValue, totalPnL, historyStats, isUpdatingVerified,
+    totalPortfolioValue, totalPnL, historyStats, isUpdatingVerified, isBatchAnalyzing,
     network,
     
     // Actions
-    fetchAndQueue, toggleSieve, refreshVerifiedPrices,
+    fetchAndQueue, toggleSieve, refreshVerifiedPrices, runBatchAnalysis,
     analyzeToken, openBuyModal, executeBuy, closePosition, askAiToManage,
     fetchBalance, handleAirdrop, fetchPortfolio,
     

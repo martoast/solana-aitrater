@@ -2,6 +2,34 @@
   "activeTrades": [],
   "history": [
     {
+      "id": "49jn1r",
+      "address": "4XmHEjLMvynGLGR2y3kEXVftdeM83PfFLmtaSnGTpump",
+      "symbol": "$4XmH",
+      "name": "4XmH",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/7feb88a286be575779279a5014546e85a7de0a8d36f0f330d08d1783c5adf67b?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.006324,
+      "amount": 50,
+      "timestamp": 1763960378349,
+      "status": "CLOSED",
+      "exitPrice": 0.006428,
+      "pnl": 0.8222643896268179,
+      "closedAt": 1763960383824
+    },
+    {
+      "id": "lxemi7",
+      "address": "yMXA6MduqkGiRkDjqiPNapibyFdfBGt3mA8iH6jdaos",
+      "symbol": "$yMXA",
+      "name": "yMXA",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/2da5173b076abf1f33c0d1d4facd4b0b436bc86b980f35051396213c735f1040?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.0001187,
+      "amount": 10,
+      "timestamp": 1763959974843,
+      "status": "CLOSED",
+      "exitPrice": 0.0001477,
+      "pnl": 2.4431339511373222,
+      "closedAt": 1763959978377
+    },
+    {
       "id": "upge3n",
       "address": "DVmVkhuqmAqZc9JdJmkLPfJyR69ssr5JKVfUbnEdaos",
       "symbol": "$DVmV",
