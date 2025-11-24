@@ -1,0 +1,103 @@
+{
+  "activeTrades": [],
+  "history": [
+    {
+      "id": "7ill4",
+      "address": "9w3pJSRhxPFAvsxNJDkQV7kvAj3DtSQJXFPnVCKWYeba",
+      "symbol": "$9w3p",
+      "name": "9w3p",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/649d4236258bb7ada86234e1c54f4b5e09e346d2225512a365ac5854c0fb2bc7?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.007039,
+      "amount": 10,
+      "timestamp": 1763948299863,
+      "status": "CLOSED",
+      "exitPrice": 0.007075,
+      "pnl": 0.05114362835630001,
+      "closedAt": 1763948328869
+    },
+    {
+      "id": "m7i9lv",
+      "address": "6qMdvspsRAF8tY919hZGK8pN1mfpYvaKZuTRq2vdaos",
+      "symbol": "$6qMd",
+      "name": "6qMd",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/1f5d76aee8754e7e303a1d839243e1a162c09e20aaa05252f1ab322f0a4e4a79?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.0001183,
+      "amount": 10,
+      "timestamp": 1763948262777,
+      "status": "CLOSED",
+      "exitPrice": 0.0001322,
+      "pnl": 1.1749788672865584,
+      "closedAt": 1763948268420
+    },
+    {
+      "id": "vpjoti",
+      "address": "12WDD1Pg8stjbG8pi8jU1ute2ksHwt6SFinxEGfQdaos",
+      "symbol": "$12WD",
+      "name": "12WD",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/05bf4efeca8537f2bd5db4bc5735e19af709f6c708e997976a7385173a89939f?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.0001046,
+      "amount": 100,
+      "timestamp": 1763948043004,
+      "status": "CLOSED",
+      "exitPrice": 0.0001141,
+      "pnl": 9.082217973231359,
+      "closedAt": 1763948062736
+    },
+    {
+      "id": "nbb70n",
+      "address": "12WDD1Pg8stjbG8pi8jU1ute2ksHwt6SFinxEGfQdaos",
+      "symbol": "$12WD",
+      "name": "12WD",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/05bf4efeca8537f2bd5db4bc5735e19af709f6c708e997976a7385173a89939f?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.0001186,
+      "amount": 10,
+      "timestamp": 1763947500579,
+      "status": "CLOSED",
+      "exitPrice": 0.0001066,
+      "pnl": -1.0118043844856657,
+      "closedAt": 1763947570322
+    },
+    {
+      "id": "i9o92p",
+      "address": "HAzBAwYmnkY6LXecjPLqZPc8LhHZ3YKTbWvkycf8pump",
+      "symbol": "$HAzB",
+      "name": "HAzB",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/09a13254f5d774a0e151f9f51a84a3e868ebed8dce539162dd746a84a9e5089e?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.00008185,
+      "amount": 10,
+      "timestamp": 1763939079145,
+      "status": "CLOSED",
+      "exitPrice": 0.00004771,
+      "pnl": -4.171044593769089,
+      "closedAt": 1763939634063
+    },
+    {
+      "id": "ymsi5",
+      "address": "iVLEh9v99VHhVNTCddujtYvBbZAGH73QZCALVWCdaos",
+      "symbol": "$iVLE",
+      "name": "iVLE",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/09f596a24ad26f812b20c298725253f1108e9c711ad74a71c29632441dc271da?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.0001849,
+      "amount": 10,
+      "timestamp": 1763939425427,
+      "status": "CLOSED",
+      "exitPrice": 0.0001286,
+      "pnl": -3.0448891292590585,
+      "closedAt": 1763939631190
+    },
+    {
+      "id": "1fyxql",
+      "address": "pLHqGLZVswwUhMQ2bvyjKyheQSKDjtZYYHGH7g5daos",
+      "symbol": "$pLHq",
+      "name": "pLHq",
+      "logoURI": "https://cdn.dexscreener.com/cms/images/b55a32561d08787cf4e250b62c2e1d84b30af10bee549f8f161b94cb72e97dc4?width=64&height=64&fit=crop&quality=95&format=auto",
+      "entryPrice": 0.0001328,
+      "amount": 100,
+      "timestamp": 1763938632945,
+      "status": "CLOSED",
+      "exitPrice": 0.0001379,
+      "pnl": 3.840361445783124,
+      "closedAt": 1763938658867
+    }
+  ]
+}
