@@ -9,21 +9,20 @@ onMounted(() => {
 })
 </script>
 
+<!-- Template remains same -->
 <template>
-  <div class="max-w-2xl mx-auto space-y-6 p-6">
-    <div class="bg-black/20 p-6 rounded-xl border border-slate-600 text-center">
-        <p class="text-slate-400 text-sm">Devnet SOL Balance</p>
-        <h2 class="text-4xl font-bold text-white mt-2">{{ balance?.toFixed(4) }} SOL</h2>
+  <div class="max-w-lg mx-auto space-y-6 p-6">
+    <div class="bg-black/20 p-10 rounded-xl border border-slate-600 text-center">
+        <p class="text-slate-400 text-sm uppercase tracking-widest">Balance</p>
+        <h2 class="text-5xl font-bold text-white mt-2">{{ balance?.toFixed(4) }} <span class="text-2xl text-purple-400">SOL</span></h2>
+        <p class="text-xs text-slate-600 mt-2">{{ network }}</p>
     </div>
-    <div class="grid grid-cols-2 gap-4">
-      <button @click="fetchBalance" class="py-3 bg-slate-700 hover:bg-slate-600 rounded-lg font-bold transition-colors">Refresh Balance</button>
-      <button @click="handleAirdrop" :disabled="airdropping" class="py-3 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-lg font-bold transition-colors flex items-center justify-center gap-2">
-        <span v-if="airdropping" class="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></span>
-        {{ airdropping ? 'Airdropping...' : 'Faucet (+1 SOL)' }}
+    <div class="grid grid-cols-1 gap-4">
+      <button @click="fetchBalance" class="py-4 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-xl font-bold transition-colors">Refresh Balance</button>
+      <button v-if="network === 'devnet'" @click="handleAirdrop" :disabled="airdropping" class="py-4 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-xl font-bold text-black transition-colors flex items-center justify-center gap-2">
+        <span v-if="airdropping" class="animate-spin h-4 w-4 border-2 border-black border-t-transparent rounded-full"></span>
+        {{ airdropping ? 'Airdropping...' : 'Request 1 SOL Faucet' }}
       </button>
-    </div>
-    <div class="text-center text-slate-500 text-xs">
-       Only works on Devnet.
     </div>
   </div>
 </template>

@@ -1,14 +1,13 @@
-import { ref, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 import { Connection, clusterApiUrl, LAMPORTS_PER_SOL } from '@solana/web3.js'
 import { useWallet } from 'solana-wallets-vue'
 
 // --- GLOBAL STATE (Singleton) ---
-// Holds state across components so tabs don't reset
 const activeTab = ref<'hunter' | 'positions' | 'wallet'>('hunter')
 const hunterMode = ref<'trending' | 'fresh'>('fresh')
 const balance = ref<number | null>(null)
 
-// Data Lists
+// Data
 const verifiedTokens = ref<any[]>([])
 const rejectedTokens = ref<any[]>([])
 const processingQueue = ref<any[]>([])
@@ -20,14 +19,14 @@ const checkedCache = ref(new Set<string>())
 const minLiquidity = ref(5000)
 const minVolume = ref(1000)
 
-// UI/Loading States
+// UI/Loading
 const loadingHunter = ref(false)
 const loadingPortfolio = ref(false)
 const isRefreshing = ref(false)
 const isSieveRunning = ref(false)
 const currentChecking = ref<string>('')
 const isUpdatingVerified = ref(false)
-const isBatchAnalyzing = ref(false) // <--- Batch AI State
+const isBatchAnalyzing = ref(false)
 const airdropping = ref(false)
 const processingId = ref<string | null>(null)
 
@@ -50,10 +49,17 @@ export const useTrader = () => {
   
   // --- HELPERS ---
   const formatVal = (num: number) => {
-    if (!num || isNaN(num)) return '$0'
-    if (num > 1000000) return `$${(num/1000000).toFixed(1)}M`
-    if (num > 1000) return `$${(num/1000).toFixed(1)}K`
-    return `$${Math.floor(num).toLocaleString()}`
+    const n = Number(num)
+    if (!n || isNaN(n)) return '$0'
+    if (n > 1000000) return `$${(n/1000000).toFixed(1)}M`
+    if (n > 1000) return `$${(n/1000).toFixed(1)}K`
+    return `$${Math.floor(n).toLocaleString()}`
+  }
+
+  const formatPrice = (num: any) => {
+    const n = Number(num)
+    if (isNaN(n) || n === 0) return '0.000000'
+    return n < 0.01 ? n.toFixed(8) : n.toFixed(4)
   }
 
   const formatTimeAgo = (isoDate: string) => {
@@ -68,7 +74,7 @@ export const useTrader = () => {
 
   const getExplorerLink = (address: string) => `https://birdeye.so/token/${address}?chain=solana`
 
-  // --- COMPUTED METRICS ---
+  // --- COMPUTED ---
   const totalPortfolioValue = computed(() => {
     let total = 0
     activeTrades.value.forEach(t => {
@@ -118,7 +124,61 @@ export const useTrader = () => {
     return combinedData
   }
 
-  // --- HUNTER / SIEVE LOGIC ---
+  // --- PORTFOLIO LOGIC ---
+  const refreshPortfolioPrices = async () => {
+    if (activeTrades.value.length === 0) return
+    isRefreshing.value = true
+    try {
+      const addresses = activeTrades.value.map(t => t.address).filter(a => a)
+      if (addresses.length === 0) return
+      const marketMap: any = await fetchBatchPrices(addresses)
+      activeTrades.value.forEach(trade => {
+        const fresh = marketMap[trade.address]
+        if (fresh) {
+          trade.currentPrice = Number(fresh.price)
+          const currentValue = (trade.amount / trade.entryPrice) * trade.currentPrice
+          trade.currentValue = currentValue
+          trade.pnl = currentValue - trade.amount
+          trade.pnlPercent = ((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * 100
+        }
+      })
+    } catch (e) { console.error(e) }
+    finally { isRefreshing.value = false }
+  }
+
+  const fetchPortfolio = async () => {
+    loadingPortfolio.value = true
+    try {
+      const res = await fetch('/api/portfolio')
+      const json = await res.json()
+      
+      activeTrades.value = json.trades.map((t: any) => {
+        const existing = activeTrades.value.find(old => old.id === t.id)
+        return {
+          ...t,
+          currentPrice: existing?.currentPrice || null, 
+          pnl: existing?.pnl || 0,
+          pnlPercent: existing?.pnlPercent || 0,
+          currentValue: existing?.currentValue || t.amount
+        }
+      })
+      tradeHistory.value = json.history || []
+      await refreshPortfolioPrices()
+    } catch (e) { console.error(e) }
+    finally { loadingPortfolio.value = false }
+  }
+
+  const startPortfolioMonitor = () => {
+    fetchPortfolio()
+    if (portfolioTimer) clearInterval(portfolioTimer)
+    portfolioTimer = setInterval(refreshPortfolioPrices, 3000)
+  }
+  
+  const stopPortfolioMonitor = () => {
+    if (portfolioTimer) clearInterval(portfolioTimer)
+  }
+
+  // --- HUNTER LOGIC ---
   const fetchAndQueue = async () => {
     loadingHunter.value = true
     verifiedTokens.value = []
@@ -156,12 +216,12 @@ export const useTrader = () => {
       const data = await res.json()
       
       if (data.success && data.overview) {
-         token.liquidity = parseFloat(data.overview.liquidity || token.liquidity || 0)
-         token.v24hUSD = parseFloat(data.overview.volume?.h24 || 0)
-         token.priceChange5m = parseFloat(data.overview.priceChange?.m5 || 0)
-         token.priceChange1h = parseFloat(data.overview.priceChange?.h1 || 0)
-         token.price24hChangePercent = parseFloat(data.overview.priceChange?.h24 || 0)
-         token.price = parseFloat(data.overview.price || token.price || 0)
+         token.liquidity = Number(data.overview.liquidity || 0)
+         token.v24hUSD = Number(data.overview.volume?.h24 || 0)
+         token.price24hChangePercent = Number(data.overview.priceChange?.h24 || 0)
+         token.priceChange5m = Number(data.overview.priceChange?.m5 || 0)
+         token.priceChange1h = Number(data.overview.priceChange?.h1 || 0)
+         token.price = Number(data.overview.price || 0)
          
          token.socials = {
            website: token.prefilledSocials?.website || data.socials?.website,
@@ -176,19 +236,35 @@ export const useTrader = () => {
       const hasVolume = token.v24hUSD >= minVolume.value
   
       if (hasSocials && hasLiquidity && hasVolume) {
-         verifiedTokens.value.unshift(token) 
+         currentChecking.value = `AI Analyzing ${token.symbol}...`
+         const tokenPayload = { ...token }
+         const enrichedData = { data: data.overview, overview: { extensions: token.socials } }
+         const aiRes = await fetch('/api/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tokenPayload, enriched: enrichedData })
+         })
+         const aiResult = await aiRes.json()
+         token.aiScore = aiResult.confidence
+         token.aiDecision = aiResult.decision
+         token.aiReason = aiResult.reason
+         if (aiResult.decision === 'AVOID') {
+            token.rejectReason = `AI: ${aiResult.reason.slice(0, 25)}...`
+            rejectedTokens.value.unshift(token)
+         } else {
+            verifiedTokens.value.unshift(token) 
+         }
       } else {
          if (!hasSocials) token.rejectReason = 'No Socials'
-         else if (!hasLiquidity) token.rejectReason = `Low Liq ($${formatVal(token.liquidity)})`
-         else if (!hasVolume) token.rejectReason = `Low Vol ($${formatVal(token.v24hUSD)})`
-         else token.rejectReason = 'Filter Reject'
+         else if (!hasLiquidity) token.rejectReason = `Liq $${formatVal(token.liquidity)}`
+         else if (!hasVolume) token.rejectReason = `Vol $${formatVal(token.v24hUSD)}`
          rejectedTokens.value.unshift(token) 
       }
     } catch (e) {
       token.rejectReason = 'API Error'
       rejectedTokens.value.unshift(token)
     } finally {
-      setTimeout(() => { processNextInQueue() }, 350)
+      setTimeout(() => { processNextInQueue() }, 500)
     }
   }
 
@@ -209,63 +285,33 @@ export const useTrader = () => {
     const marketMap: any = await fetchBatchPrices(addresses)
     verifiedTokens.value.forEach(token => {
       const fresh = marketMap[token.address]
-      if (fresh) {
-        Object.assign(token, fresh)
-      }
+      if (fresh) Object.assign(token, fresh)
     })
     isUpdatingVerified.value = false
   }
 
-  // --- AI ANALYSIS ---
+  // --- AI / MODALS ---
   const analyzeToken = async (token: any) => {
     processingId.value = token.address
     aiAnalysis.value = null
     try {
-      const enrichRes = await fetch('/api/enrich', {
+      const res = await fetch('/api/check-metadata', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ address: token.address })
       })
-      const enrichedData = await enrichRes.json()
-      enrichedData.overview = { extensions: token.socials }
-      const tokenPayload = { ...token, price: token.price || 0.000001 }
-      const res = await fetch('/api/analyze', {
+      const data = await res.json()
+      const tokenPayload = { ...token, price: Number(data.overview?.price || token.price) }
+      const enrichedData = { data: data.overview, overview: { extensions: token.socials } }
+      const aiRes = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: tokenPayload, enriched: enrichedData })
       })
-      const result = await res.json()
+      const result = await aiRes.json()
       aiAnalysis.value = { ...result, token: tokenPayload }
     } catch (e) { console.error(e) } 
     finally { processingId.value = null }
-  }
-
-  const runBatchAnalysis = async () => {
-    // Only analyze tokens that haven't been scored yet
-    const tokensToAnalyze = verifiedTokens.value.filter(t => !t.aiScore)
-    if (tokensToAnalyze.length === 0) return
-
-    isBatchAnalyzing.value = true
-    try {
-      const res = await fetch('/api/batch-analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tokens: tokensToAnalyze })
-      })
-      const json = await res.json()
-
-      if (json.success && json.results) {
-        verifiedTokens.value.forEach(token => {
-          const result = json.results[token.address]
-          if (result) {
-            token.aiScore = result.score
-            token.aiTag = result.tag
-            token.aiReason = result.reason
-          }
-        })
-      }
-    } catch (e) { console.error(e) }
-    finally { isBatchAnalyzing.value = false }
   }
 
   const askAiToManage = async (trade: any) => {
@@ -289,55 +335,14 @@ export const useTrader = () => {
     finally { processingId.value = null }
   }
 
-  // --- PORTFOLIO ---
-  const refreshPortfolioPrices = async () => {
-    if (activeTrades.value.length === 0) return
-    isRefreshing.value = true
-    try {
-      const addresses = activeTrades.value.map(t => t.address).filter(a => a)
-      if (addresses.length === 0) return
-      const marketMap: any = await fetchBatchPrices(addresses)
-      activeTrades.value.forEach(trade => {
-        const fresh = marketMap[trade.address]
-        if (fresh) {
-          trade.currentPrice = fresh.price
-          const currentValue = (trade.amount / trade.entryPrice) * fresh.price
-          trade.currentValue = currentValue
-          trade.pnl = currentValue - trade.amount
-          trade.pnlPercent = ((fresh.price - trade.entryPrice) / trade.entryPrice) * 100
-        }
-      })
-    } catch (e) { console.error(e) }
-    finally { isRefreshing.value = false }
-  }
-
-  const fetchPortfolio = async () => {
-    loadingPortfolio.value = true
-    try {
-      const res = await fetch('/api/portfolio')
-      const json = await res.json()
-      activeTrades.value = json.trades.map((t: any) => {
-        const existing = activeTrades.value.find(old => old.id === t.id)
-        return {
-          ...t,
-          currentPrice: existing?.currentPrice || null, 
-          pnl: existing?.pnl || 0,
-          pnlPercent: existing?.pnlPercent || 0,
-          currentValue: existing?.currentValue || t.amount
-        }
-      })
-      tradeHistory.value = json.history || []
-      await refreshPortfolioPrices()
-    } catch (e) { console.error(e) }
-    finally { loadingPortfolio.value = false }
-  }
-
-  // --- TRADING EXECUTION ---
   const openBuyModal = (token: any) => {
-    if (!token.price) token.price = 0.000001; 
-    selectedToken.value = token
-    showBuyModal.value = true
-    aiAnalysis.value = null // Close AI modal if open
+    const safePrice = Number(token.price)
+    selectedToken.value = { 
+        ...token, 
+        price: isNaN(safePrice) || safePrice === 0 ? 0.000001 : safePrice 
+    }
+    aiAnalysis.value = null 
+    showBuyModal.value = true 
   }
 
   const executeBuy = async () => {
@@ -354,24 +359,24 @@ export const useTrader = () => {
       if(json.success) {
         showBuyModal.value = false
         activeTab.value = 'positions'
-        fetchPortfolio() 
+        // NOTE: We don't call fetchPortfolio here directly, we let the component lifecycle handle it
       }
     } catch(e) { alert("Trade Failed") } 
     finally { isBuying.value = false }
   }
 
   const closePosition = async (trade: any) => {
-    const currentPrice = trade.currentPrice || trade.entryPrice
-    const res = await fetch('/api/trade', {
-       method: 'POST',
-       headers: { 'Content-Type': 'application/json' },
-       body: JSON.stringify({ action: 'CLOSE', tradeId: trade.id, currentPrice: currentPrice }) 
-     })
-     const json = await res.json()
-     if(json.success) { 
-       manageAdvice.value = null
-       fetchPortfolio() 
-     }
+     const currentPrice = trade.currentPrice || trade.entryPrice
+     const res = await fetch('/api/trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'CLOSE', tradeId: trade.id, currentPrice: currentPrice }) 
+      })
+      const json = await res.json()
+      if(json.success) { 
+        manageAdvice.value = null
+        fetchPortfolio() 
+      }
   }
 
   // --- WALLET ---
@@ -402,26 +407,9 @@ export const useTrader = () => {
     finally { airdropping.value = false }
   }
 
-  // --- TIMERS ---
-  const startPortfolioMonitor = () => {
-    fetchPortfolio()
-    if (portfolioTimer) clearInterval(portfolioTimer)
-    portfolioTimer = setInterval(refreshPortfolioPrices, 3000)
-  }
-  
-  const stopPortfolioMonitor = () => {
-    if (portfolioTimer) clearInterval(portfolioTimer)
-  }
-
-  // Watchers
-  watch(activeTab, (newTab) => {
-    if (newTab === 'positions') startPortfolioMonitor()
-    else stopPortfolioMonitor()
-    if (newTab === 'wallet') fetchBalance()
-  })
+  // NOTE: Removed the watchers from here. Components will manage their own data fetching.
 
   return {
-    // State
     activeTab, hunterMode, balance, verifiedTokens, rejectedTokens, 
     processingQueue, activeTrades, tradeHistory, isSieveRunning, 
     currentChecking, minLiquidity, minVolume, loadingHunter, 
@@ -430,12 +418,10 @@ export const useTrader = () => {
     totalPortfolioValue, totalPnL, historyStats, isUpdatingVerified, isBatchAnalyzing,
     network,
     
-    // Actions
-    fetchAndQueue, toggleSieve, refreshVerifiedPrices, runBatchAnalysis,
+    fetchAndQueue, toggleSieve, refreshVerifiedPrices,
     analyzeToken, openBuyModal, executeBuy, closePosition, askAiToManage,
-    fetchBalance, handleAirdrop, fetchPortfolio,
+    fetchBalance, handleAirdrop, fetchPortfolio, startPortfolioMonitor, stopPortfolioMonitor,
     
-    // Helpers
-    formatVal, getExplorerLink, formatTimeAgo
+    formatVal, getExplorerLink, formatTimeAgo, formatPrice
   }
 }
