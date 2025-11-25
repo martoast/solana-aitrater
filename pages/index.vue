@@ -21,8 +21,8 @@ import { onMounted, onUnmounted, ref, nextTick, watch, computed } from 'vue'
 // --- 3. TRADER STATE ---
 const { 
   isAutoTrading, 
-  startGodMode, 
-  stopGodMode,
+  startBot, 
+  StopBot,
   botSettings, 
   botLogs,
   totalPortfolioValue, 
@@ -95,20 +95,20 @@ onUnmounted(() => {
 // --- 8. CONTROLS ---
 const toggleBot = () => {
   if (isAutoTrading.value) {
-    stopGodMode()
+    StopBot()
     if (runningTimer) {
       clearInterval(runningTimer)
       runningTimer = null
     }
   } else {
     runningTime.value = 0
-    startGodMode()
+    startBot()
     runningTimer = setInterval(() => runningTime.value++, 1000)
   }
 }
 
 const emergencyStop = () => {
-  stopGodMode()
+  StopBot()
   if (runningTimer) {
     clearInterval(runningTimer)
     runningTimer = null

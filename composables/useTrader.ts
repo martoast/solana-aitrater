@@ -386,12 +386,12 @@ export const useTrader = () => {
     }
   };
 
-  // === GOD MODE ===
-  const startGodMode = () => {
+  // === BOT CONTROLS ===
+  const startBot = () => {
     if (isAutoTrading.value) return;
     isAutoTrading.value = true;
     stats.value.scoringCycles = 0;
-    log("🤖 ALGO MODE ACTIVATED", "success");
+    log("🤖 ALEX_BOT STARTED", "success");
     fetchPortfolio();
     runDiscovery(); discoveryTimer = setInterval(runDiscovery, 15000);
     isSieveRunning.value = true;
@@ -401,8 +401,8 @@ export const useTrader = () => {
     cleanupTimer = setInterval(runCleanup, 45000);
   };
 
-  const stopGodMode = () => {
-    isAutoTrading.value = false; isSieveRunning.value = false; currentChecking.value = "Stopped"; log("🛑 ALGO MODE STOPPED", "warn");
+  const StopBot = () => {
+    isAutoTrading.value = false; isSieveRunning.value = false; currentChecking.value = "Stopped"; log("🛑 ALEX_BOT STOPPED", "warn");
     if (discoveryTimer) clearInterval(discoveryTimer);
     if (sieveTimer) clearTimeout(sieveTimer);
     if (scoringTimer) clearInterval(scoringTimer);
@@ -416,6 +416,6 @@ export const useTrader = () => {
 
   return {
     isAutoTrading, botSettings, botLogs, totalPortfolioValue, totalPnL, activeTrades, historyStats, currentChecking, discoveryQueue, verifiedTokens, rejectedTokens, showBuyModal, selectedToken, buyAmount, isBuying, stats, isScoringRunning, isSieveRunning, tradeHistory,
-    startGodMode, stopGodMode, refreshPortfolioPrices, fetchPortfolio, closePosition, openBuyModal, executeBuy, formatVal, formatPrice, formatTimeAgo, calculateScore, getExplorerLink
+    startBot, StopBot, refreshPortfolioPrices, fetchPortfolio, closePosition, openBuyModal, executeBuy, formatVal, formatPrice, formatTimeAgo, calculateScore, getExplorerLink
   };
 };
