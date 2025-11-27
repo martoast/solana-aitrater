@@ -11,41 +11,52 @@ import type { TokenData } from '~/types/trading';
 // === TYPES ===
 interface StreamTokenData {
   address: string;
-  timestamp: number;
+  timestamp?: number;
+  lastUpdate?: number;
   source: string;
+  dataQuality?: string;
   price: number;
-  
+  priceNative?: number;
+
   priceChange1m: number;
   priceChange5m: number;
-  priceChange30m: number;
+  priceChange30m?: number;
   priceChange1h: number;
-  priceChange24h: number;
-  
+  priceChange24h?: number;
+
   volume1m: number;
   volume5m: number;
-  volume30m: number;
+  volume30m?: number;
   volume1h: number;
-  volume24h: number;
-  
-  buys1m: number;
-  sells1m: number;
-  buys5m: number;
-  sells5m: number;
-  buys1h: number;
-  sells1h: number;
-  
-  trades1m: number;
-  trades5m: number;
-  trades1h: number;
-  
+  volume24h?: number;
+
+  // New format (from updated API)
+  txns1m?: { buys: number; sells: number };
+  txns5m?: { buys: number; sells: number };
+  txns1h?: { buys: number; sells: number };
+
+  // Old format (for backwards compatibility)
+  buys1m?: number;
+  sells1m?: number;
+  buys5m?: number;
+  sells5m?: number;
+  buys1h?: number;
+  sells1h?: number;
+
+  trades1m?: number;
+  trades5m?: number;
+  trades1h?: number;
+
   liquidity: number;
   symbol: string;
   name: string;
-  mc: number;
-  fdv: number;
-  holder: number;
-  createdAt: number | null;
-  ageMinutes: number | null;
+  mc?: number;
+  fdv?: number;
+  holder?: number;
+  createdAt?: number | null;
+  pairCreatedAt?: number | null;
+  ageMinutes?: number | null;
+  logoURI?: string | null;
 }
 
 // === STATE ===
@@ -207,67 +218,73 @@ export function useTokenQueue() {
 
   // === CONVERT TO TOKENDATA FORMAT ===
   const toTokenData = (stream: StreamTokenData, existingData?: Partial<TokenData>): TokenData => {
-    const ageMinutes = stream.ageMinutes || 
-      (stream.createdAt ? Math.round((Date.now() - stream.createdAt) / 60000) : undefined);
+    // Handle both old format (buys1m/sells1m) and new format (txns1m.buys/sells)
+    const txns1m = stream.txns1m || { buys: stream.buys1m || 0, sells: stream.sells1m || 0 };
+    const txns5m = stream.txns5m || { buys: stream.buys5m || 0, sells: stream.sells5m || 0 };
+    const txns1h = stream.txns1h || { buys: stream.buys1h || 0, sells: stream.sells1h || 0 };
+
+    const ageMinutes = stream.ageMinutes ||
+      (stream.createdAt ? Math.round((Date.now() - stream.createdAt) / 60000) : undefined) ||
+      (stream.pairCreatedAt ? Math.round((Date.now() - stream.pairCreatedAt) / 60000) : undefined);
 
     return {
       address: stream.address,
       symbol: stream.symbol || existingData?.symbol || 'UNK',
       name: stream.name || existingData?.name || '',
-      logoURI: existingData?.logoURI || '',
+      logoURI: stream.logoURI || existingData?.logoURI || '',
       price: stream.price,
-      liquidity: stream.liquidity,
+      liquidity: stream.liquidity || 0,
       fdv: stream.fdv,
       mc: stream.mc,
       ageMinutes,
       ageHours: ageMinutes ? Math.round(ageMinutes / 60 * 10) / 10 : undefined,
-      
+
       // Price changes
       priceChange1m: stream.priceChange1m,
       priceChange5m: stream.priceChange5m,
-      priceChange15m: stream.priceChange30m / 2,
+      priceChange15m: stream.priceChange30m ? stream.priceChange30m / 2 : undefined,
       priceChange30m: stream.priceChange30m,
       priceChange1h: stream.priceChange1h,
       priceChange24h: stream.priceChange24h,
-      
+
       // Volume
       volume1m: stream.volume1m,
       volume5m: stream.volume5m,
-      volume15m: stream.volume30m / 2,
+      volume15m: stream.volume30m ? stream.volume30m / 2 : undefined,
       volume30m: stream.volume30m,
       volume1h: stream.volume1h,
       volume24h: stream.volume24h,
-      
-      // Transactions
+
+      // Transactions - handle both formats
       txns1m: {
-        buys: stream.buys1m,
-        sells: stream.sells1m,
+        buys: txns1m.buys || 0,
+        sells: txns1m.sells || 0,
       },
       txns5m: {
-        buys: stream.buys5m,
-        sells: stream.sells5m,
+        buys: txns5m.buys || 0,
+        sells: txns5m.sells || 0,
       },
       txns15m: {
-        buys: Math.round(stream.buys1h / 4),
-        sells: Math.round(stream.sells1h / 4),
+        buys: Math.round((txns1h.buys || 0) / 4),
+        sells: Math.round((txns1h.sells || 0) / 4),
       },
       txns30m: {
-        buys: Math.round(stream.buys1h / 2),
-        sells: Math.round(stream.sells1h / 2),
+        buys: Math.round((txns1h.buys || 0) / 2),
+        sells: Math.round((txns1h.sells || 0) / 2),
       },
       txns1h: {
-        buys: stream.buys1h,
-        sells: stream.sells1h,
+        buys: txns1h.buys || 0,
+        sells: txns1h.sells || 0,
       },
-      
+
       // Derived
-      txnVelocity1m: stream.trades1m,
+      txnVelocity1m: stream.trades1m || (txns1m.buys + txns1m.sells),
       priceVelocity1m: stream.priceChange1m,
-      
+
       // Meta
-      pairCreatedAt: stream.createdAt || undefined,
-      lastUpdated: stream.timestamp,
-      dataQuality: stream.source === 'local-stream' ? 'full' : 'partial',
+      pairCreatedAt: stream.pairCreatedAt || stream.createdAt || undefined,
+      lastUpdated: stream.timestamp || stream.lastUpdate,
+      dataQuality: stream.dataQuality === 'full' ? 'full' : (stream.source === 'local-stream' ? 'full' : 'partial'),
       holder: stream.holder,
     };
   };
