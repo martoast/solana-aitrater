@@ -11,8 +11,9 @@ export default defineNuxtConfig({
     // SERVER SIDE KEYS
     // IMPORTANT: Set these to empty strings! 
     // Nuxt will automatically read 'NUXT_BIRDEYE_API_KEY' and 'NUXT_GEMINI_API_KEY' from Netlify Env vars.
-    birdEyeApiKey: '', 
+    birdeyeApiKey: '', 
     geminiApiKey: '',
+    heliusApiKey: '',
     
     // CLIENT SIDE KEYS
     public: {

@@ -1,45 +1,62 @@
 /**
  * SCORING ENGINE REGISTRY
  * 
- * This file exports all available scoring engines.
+ * All available scoring engines are registered here.
+ * 
  * To add a new engine:
- * 1. Create a new file in this directory (e.g., momentum-v2.ts)
- * 2. Implement the ScoringEngine interface
- * 3. Export it from this file
+ * 1. Create a new file in this directory (e.g., my-strategy.ts)
+ * 2. Implement the ScoringEngine interface from ~/types/trading
+ * 3. Import it below
+ * 4. Add it to the SCORING_ENGINES object
+ * 5. The engine will automatically appear in the UI
  */
 
 import type { ScoringEngine } from '~/types/trading';
-import { ScalpingV1Engine } from './scalping-v1';
+
+import { MemecoinSniperV1Engine } from './memecoin-sniper-v1';
 
 // === AVAILABLE ENGINES ===
 export const SCORING_ENGINES: Record<string, ScoringEngine> = {
-  'scalping-v1': ScalpingV1Engine,
-  // Add more engines here:
-  // 'momentum-v2': MomentumV2Engine,
-  // 'conservative-v1': ConservativeV1Engine,
+  'memecoin-sniper-v1': MemecoinSniperV1Engine,
 };
 
 // === DEFAULT ENGINE ===
-export const DEFAULT_ENGINE = 'scalping-v1';
+export const DEFAULT_ENGINE = 'memecoin-sniper-v1';
 
 // === GET ENGINE BY NAME ===
 export function getScoringEngine(name: string): ScoringEngine {
   const engine = SCORING_ENGINES[name];
   if (!engine) {
-    console.warn(`Scoring engine "${name}" not found, using default`);
+    console.warn(`[ScoringEngine] Engine "${name}" not found, using default: ${DEFAULT_ENGINE}`);
     return SCORING_ENGINES[DEFAULT_ENGINE];
   }
   return engine;
 }
 
 // === LIST ALL ENGINES ===
-export function listScoringEngines(): Array<{ id: string; name: string; description: string }> {
+export function listScoringEngines(): Array<{ 
+  id: string; 
+  name: string; 
+  version: string;
+  description: string;
+}> {
   return Object.entries(SCORING_ENGINES).map(([id, engine]) => ({
     id,
     name: engine.name,
+    version: engine.version,
     description: engine.description,
   }));
 }
 
-// Re-export engines for direct import
-export { ScalpingV1Engine } from './scalping-v1';
+// === GET ENGINE COUNT ===
+export function getEngineCount(): number {
+  return Object.keys(SCORING_ENGINES).length;
+}
+
+// === CHECK IF ENGINE EXISTS ===
+export function engineExists(name: string): boolean {
+  return name in SCORING_ENGINES;
+}
+
+// === RE-EXPORT INDIVIDUAL ENGINES ===
+export { MemecoinSniperV1Engine } from './memecoin-sniper-v1';

@@ -1,9 +1,31 @@
+/**
+ * server/api/hunter.get.ts
+ * 
+ * Unified token discovery endpoint.
+ * 
+ * FREE Data Sources:
+ * - BirdEye Trending (FREE tier)
+ * - BirdEye New Listings (FREE tier)
+ * - DexScreener Profiles (no API key needed)
+ * - DexScreener Boosts (no API key needed)
+ * 
+ * Rate Limits:
+ * - BirdEye: 1 RPS, 30,000 CUs/month
+ * - DexScreener: No strict limit (be reasonable)
+ */
+
 import { defineEventHandler, getQuery } from 'h3'
 
-// Rotation state
-let rotationIndex = 0
+// === RATE LIMITING STATE ===
 let lastBirdeyeCall = 0
-const BIRDEYE_COOLDOWN_MS = 7000
+const BIRDEYE_COOLDOWN_MS = 1100 // 1 RPS = 1000ms + buffer
+
+// === ROTATION STATE ===
+let rotationIndex = 0
+
+// === CACHE (reduce duplicate API calls) ===
+const sourceCache = new Map<string, { data: any[], timestamp: number }>()
+const CACHE_TTL_MS = 30_000 // 30 seconds
 
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig()
@@ -13,27 +35,35 @@ export default defineEventHandler(async (event) => {
   try {
     let result: { items: any[], sourceName: string }
     
-    if (requestedType === 'auto' || requestedType === 'fresh') {
-      result = await getNextRotationSource(config.birdEyeApiKey)
-    } else if (requestedType === 'trending') {
-      result = await fetchBirdeyeTrending(config.birdEyeApiKey)
-    } else if (requestedType === 'boosts') {
-      result = await fetchDexScreenerBoosts()
-    } else if (requestedType === 'profiles') {
-      result = await fetchDexScreenerProfiles()
-    } else if (requestedType === 'newborn') {
-      result = await fetchNewbornTokens()
-    } else if (requestedType === 'active') {
-      result = await fetchHighVolumeTokens()
-    } else {
-      result = await fetchDexScreenerProfiles()
+    switch (requestedType) {
+      case 'auto':
+        result = await getNextRotationSource(config.birdeyeApiKey)
+        break
+      case 'trending':
+        result = await fetchBirdeyeTrending(config.birdeyeApiKey)
+        break
+      case 'newListings':
+        result = await fetchBirdeyeNewListings(config.birdeyeApiKey)
+        break
+      case 'boosts':
+        result = await fetchDexScreenerBoosts()
+        break
+      case 'profiles':
+        result = await fetchDexScreenerProfiles()
+        break
+      case 'gainers':
+        result = await fetchDexScreenerGainers()
+        break
+      default:
+        result = await getNextRotationSource(config.birdeyeApiKey)
     }
 
+    // Fallback if empty
     if (result.items.length === 0) {
-      result = await fetchHighVolumeTokens()
+      result = await fetchDexScreenerProfiles()
     }
 
-    console.log(`[Hunter] ✅ Returning ${result.items.length} items from: ${result.sourceName}`)
+    console.log(`[Hunter] ✅ ${result.items.length} items from: ${result.sourceName}`)
     
     return {
       success: true,
@@ -46,271 +76,174 @@ export default defineEventHandler(async (event) => {
   }
 })
 
-// === SMART ROTATION - Alternates between NEWBORN and HIGH VOLUME ===
+// =============================================================================
+// SMART ROTATION
+// =============================================================================
+
 async function getNextRotationSource(birdeyeKey: string): Promise<{ items: any[], sourceName: string }> {
+  // Rotation pattern - balances BirdEye (rate limited) with DexScreener (unlimited)
+  // BirdEye appears less frequently to respect 1 RPS limit
   const sources = [
-    'newborn',       // Super fresh tokens (< 2 hours)
-    'highVolume',    // Established active tokens
-    'profiles',      // New listings
-    'highVolume',    // More weight on active tokens
-    'newborn',       // Fresh tokens again
-    'latestBoosts',  // Recently boosted
-    'highVolume',    // Active tokens
-    'birdeye',       // Trending
+    'trending',      // BirdEye - high quality
+    'profiles',      // DexScreener - new tokens
+    'boosts',        // DexScreener - promoted tokens
+    'newListings',   // BirdEye - fresh memecoins
+    'gainers',       // DexScreener - top gainers
+    'profiles',      // DexScreener
+    'trending',      // BirdEye
+    'boosts',        // DexScreener
   ]
   
   const sourceKey = sources[rotationIndex % sources.length]
   rotationIndex++
   
-  console.log(`[Hunter] Rotation ${rotationIndex}: ${sourceKey}`)
+  console.log(`[Hunter] Rotation #${rotationIndex}: ${sourceKey}`)
   
   switch (sourceKey) {
-    case 'newborn':
-      return fetchNewbornTokens()
-    
-    case 'highVolume':
-      return fetchHighVolumeTokens()
-    
+    case 'trending':
+      return fetchBirdeyeTrending(birdeyeKey)
+    case 'newListings':
+      return fetchBirdeyeNewListings(birdeyeKey)
     case 'profiles':
       return fetchDexScreenerProfiles()
-    
-    case 'latestBoosts':
+    case 'boosts':
       return fetchDexScreenerBoosts()
-    
-    case 'birdeye':
-      const now = Date.now()
-      if (now - lastBirdeyeCall < BIRDEYE_COOLDOWN_MS) {
-        return fetchHighVolumeTokens()
-      }
-      lastBirdeyeCall = now
-      return fetchBirdeyeTrending(birdeyeKey)
-    
+    case 'gainers':
+      return fetchDexScreenerGainers()
     default:
-      return fetchHighVolumeTokens()
+      return fetchDexScreenerProfiles()
   }
 }
 
-// === CATEGORY 1: NEWBORN TOKENS (< 2 hours old) ===
-async function fetchNewbornTokens(): Promise<{ items: any[], sourceName: string }> {
-  try {
-    // Get the freshest profiles - these are usually just created
-    const response = await fetch('https://api.dexscreener.com/token-profiles/latest/v1', {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
-    })
-    const profiles = await response.json()
-    
-    if (!Array.isArray(profiles)) {
-      return { items: [], sourceName: 'Newborn (no data)' }
-    }
-    
-    const solanaTokens = profiles
-      .filter((t: any) => t.chainId === 'solana')
-      .slice(0, 30)
-    
-    // Now get pair data to check age and activity
-    const addresses = solanaTokens.map((t: any) => t.tokenAddress).filter(Boolean)
-    if (addresses.length === 0) return { items: [], sourceName: 'Newborn (no addresses)' }
-    
-    const pairData = await fetchPairDataForAddresses(addresses)
-    
-    const items: any[] = []
-    const now = Date.now()
-    const TWO_HOURS_MS = 2 * 60 * 60 * 1000
-    
-    for (const profile of solanaTokens) {
-      const addr = profile.tokenAddress
-      const pair = pairData[addr]
-      if (!pair) continue
-      
-      const ageMs = pair.pairCreatedAt ? now - pair.pairCreatedAt : Infinity
-      const ageHours = ageMs / (1000 * 60 * 60)
-      
-      // NEWBORN CRITERIA:
-      // - Less than 2 hours old
-      // - Has SOME liquidity ($1k minimum)
-      // - Has at least a few transactions (not completely dead)
-      const txns5m = (pair.txns?.m5?.buys || 0) + (pair.txns?.m5?.sells || 0)
-      const txns1h = (pair.txns?.h1?.buys || 0) + (pair.txns?.h1?.sells || 0)
-      const liq = pair.liquidity?.usd || 0
-      
-      if (ageMs < TWO_HOURS_MS && liq >= 1000 && (txns5m >= 1 || txns1h >= 3)) {
-        items.push({
-          address: addr,
-          symbol: pair.baseToken?.symbol ? `$${pair.baseToken.symbol}` : extractSymbol(profile),
-          name: pair.baseToken?.name || profile.header || 'Unknown',
-          logoURI: profile.icon || pair.info?.imageUrl || null,
-          isNew: true,
-          isNewborn: true, // Flag for special handling
-          source: 'newborn',
-          ageMinutes: Math.round(ageMs / 60000),
-          ageHours: Math.round(ageHours * 10) / 10,
-          liquidity: liq,
-          price: parseFloat(pair.priceUsd) || 0,
-          priceChange5m: pair.priceChange?.m5 || 0,
-          priceChange1h: pair.priceChange?.h1 || 0,
-          volume5m: pair.volume?.m5 || 0,
-          volume1h: pair.volume?.h1 || 0,
-          txns: {
-            m5: pair.txns?.m5 || { buys: 0, sells: 0 },
-            h1: pair.txns?.h1 || { buys: 0, sells: 0 },
-          },
-          fdv: pair.fdv || 0,
-          pairAddress: pair.pairAddress,
-        })
-      }
-    }
-    
-    // Sort by newest first
-    items.sort((a, b) => a.ageMinutes - b.ageMinutes)
-    
-    return { items: items.slice(0, 20), sourceName: `Newborn <2h (${items.length})` }
-  } catch (e) {
-    console.error('[Hunter] Newborn error:', e)
-    return { items: [], sourceName: 'Newborn (error)' }
-  }
-}
+// =============================================================================
+// BIRDEYE SOURCES (FREE TIER - 1 RPS, 30k CUs/month)
+// =============================================================================
 
-// === CATEGORY 2: HIGH VOLUME ESTABLISHED TOKENS ===
-async function fetchHighVolumeTokens(): Promise<{ items: any[], sourceName: string }> {
-  try {
-    // Search for active Solana tokens
-    const searchTerms = ['sol', 'pump', 'pepe', 'meme', 'doge', 'cat', 'ai', 'moon', 'inu']
-    const term = searchTerms[Math.floor(Math.random() * searchTerms.length)]
-    
-    const response = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${term}`, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
-    })
-    const data = await response.json()
-    
-    if (!data.pairs || !Array.isArray(data.pairs)) {
-      return { items: [], sourceName: `HighVolume (no results)` }
-    }
-    
-    const now = Date.now()
-    
-    // Filter for HIGH ACTIVITY established tokens
-    const activePairs = data.pairs
-      .filter((p: any) => {
-        if (p.chainId !== 'solana') return false
-        
-        const liq = p.liquidity?.usd || 0
-        const vol1h = p.volume?.h1 || 0
-        const txns1h = (p.txns?.h1?.buys || 0) + (p.txns?.h1?.sells || 0)
-        const ageMs = p.pairCreatedAt ? now - p.pairCreatedAt : Infinity
-        const ageHours = ageMs / (1000 * 60 * 60)
-        
-        // HIGH VOLUME CRITERIA:
-        // - At least $20k liquidity (established)
-        // - High activity: 50+ txns in last hour OR $5k+ volume in last hour
-        // - Not ancient (< 7 days old to avoid truly dead coins that randomly spike)
-        const hasGoodLiquidity = liq >= 20000
-        const hasHighActivity = txns1h >= 50 || vol1h >= 5000
-        const notTooOld = ageHours < 168 // 7 days
-        
-        return hasGoodLiquidity && hasHighActivity && notTooOld
-      })
-      .sort((a: any, b: any) => {
-        // Sort by activity (transactions per hour)
-        const aTxns = (a.txns?.h1?.buys || 0) + (a.txns?.h1?.sells || 0)
-        const bTxns = (b.txns?.h1?.buys || 0) + (b.txns?.h1?.sells || 0)
-        return bTxns - aTxns
-      })
-      .slice(0, 20)
-    
-    const items = activePairs.map((p: any) => {
-      const ageMs = p.pairCreatedAt ? now - p.pairCreatedAt : 0
-      return {
-        address: p.baseToken?.address,
-        symbol: p.baseToken?.symbol ? `$${p.baseToken.symbol}` : '$UNK',
-        name: p.baseToken?.name || 'Unknown',
-        logoURI: p.info?.imageUrl || null,
-        isNew: false,
-        isNewborn: false,
-        isHighVolume: true, // Flag for identification
-        source: 'highVolume',
-        ageHours: Math.round(ageMs / (1000 * 60 * 60)),
-        liquidity: p.liquidity?.usd || 0,
-        price: parseFloat(p.priceUsd) || 0,
-        priceChange5m: p.priceChange?.m5 || 0,
-        priceChange1h: p.priceChange?.h1 || 0,
-        volume5m: p.volume?.m5 || 0,
-        volume1h: p.volume?.h1 || 0,
-        txns: {
-          m5: p.txns?.m5 || { buys: 0, sells: 0 },
-          h1: p.txns?.h1 || { buys: 0, sells: 0 },
-        },
-        fdv: p.fdv || 0,
-        pairAddress: p.pairAddress,
-      }
-    })
-    
-    return { items, sourceName: `HighVolume Active (${items.length})` }
-  } catch (e) {
-    console.error('[Hunter] HighVolume error:', e)
-    return { items: [], sourceName: 'HighVolume (error)' }
+async function fetchBirdeyeTrending(apiKey: string): Promise<{ items: any[], sourceName: string }> {
+  if (!apiKey) {
+    console.log('[Hunter] No BirdEye API key, falling back to DexScreener')
+    return fetchDexScreenerGainers()
   }
-}
-
-// === HELPER: Fetch pair data for multiple addresses ===
-async function fetchPairDataForAddresses(addresses: string[]): Promise<Record<string, any>> {
-  const results: Record<string, any> = {}
-  const chunkSize = 30
   
-  for (let i = 0; i < addresses.length; i += chunkSize) {
-    const chunk = addresses.slice(i, i + chunkSize)
-    try {
-      const response = await fetch(`https://api.dexscreener.com/tokens/v1/solana/${chunk.join(',')}`, {
-        headers: { 'Accept': 'application/json' }
-      })
-      const pairs = await response.json()
-      
-      if (Array.isArray(pairs)) {
-        for (const pair of pairs) {
-          const addr = pair.baseToken?.address
-          if (!addr) continue
-          // Keep the pair with highest liquidity for each token
-          const liq = pair.liquidity?.usd || 0
-          if (!results[addr] || liq > (results[addr].liquidity?.usd || 0)) {
-            results[addr] = pair
-          }
+  // Check rate limit
+  const now = Date.now()
+  if (now - lastBirdeyeCall < BIRDEYE_COOLDOWN_MS) {
+    console.log('[Hunter] BirdEye rate limited, using cache or fallback')
+    const cached = sourceCache.get('trending')
+    if (cached && now - cached.timestamp < CACHE_TTL_MS) {
+      return { items: cached.data, sourceName: 'Trending (cached)' }
+    }
+    return fetchDexScreenerGainers()
+  }
+  
+  try {
+    lastBirdeyeCall = Date.now()
+    
+    const response = await fetch(
+      'https://public-api.birdeye.so/defi/token_trending?sort_by=rank&sort_type=asc&offset=0&limit=20',
+      {
+        method: 'GET',
+        headers: {
+          'X-API-KEY': apiKey,
+          'accept': 'application/json',
+          'x-chain': 'solana'
         }
       }
-    } catch (e) {
-      console.error('[Hunter] Pair fetch error:', e)
+    )
+    
+    if (!response.ok) {
+      console.error('[Hunter] BirdEye trending error:', response.status)
+      return fetchDexScreenerGainers()
     }
+    
+    const json = await response.json()
+    
+    if (!json.success || !json.data?.tokens) {
+      return { items: [], sourceName: 'Trending (no data)' }
+    }
+    
+    const items = json.data.tokens.map((t: any) => formatBirdeyeToken(t, 'trending'))
+    
+    // Cache results
+    sourceCache.set('trending', { data: items, timestamp: Date.now() })
+    
+    return { items, sourceName: `Trending (${items.length})` }
+  } catch (e) {
+    console.error('[Hunter] BirdEye trending error:', e)
+    return fetchDexScreenerGainers()
   }
-  
-  return results
 }
 
-// === HELPER: Extract symbol from profile ===
-function extractSymbol(profile: any): string {
-  let symbol = 'UNK'
-  
-  if (profile.header && typeof profile.header === 'string' && !profile.header.startsWith('http')) {
-    symbol = profile.header.split(/[\s\-–]/)[0].replace(/[^a-zA-Z0-9$]/g, '').toUpperCase()
+async function fetchBirdeyeNewListings(apiKey: string): Promise<{ items: any[], sourceName: string }> {
+  if (!apiKey) {
+    console.log('[Hunter] No BirdEye API key, falling back to DexScreener')
+    return fetchDexScreenerProfiles()
   }
   
-  if ((!symbol || symbol === 'UNK' || symbol === '') && profile.description) {
-    const match = profile.description.match(/\$([A-Z0-9]+)/i)
-    if (match) symbol = match[1].toUpperCase()
+  // Check rate limit
+  const now = Date.now()
+  if (now - lastBirdeyeCall < BIRDEYE_COOLDOWN_MS) {
+    console.log('[Hunter] BirdEye rate limited, using cache or fallback')
+    const cached = sourceCache.get('newListings')
+    if (cached && now - cached.timestamp < CACHE_TTL_MS) {
+      return { items: cached.data, sourceName: 'New Listings (cached)' }
+    }
+    return fetchDexScreenerProfiles()
   }
   
-  if (!symbol || symbol === 'UNK' || symbol === '') {
-    symbol = profile.tokenAddress?.slice(0, 6)?.toUpperCase() || 'UNK'
+  try {
+    lastBirdeyeCall = Date.now()
+    
+    const response = await fetch(
+      'https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20&meme_platform_enabled=true',
+      {
+        method: 'GET',
+        headers: {
+          'X-API-KEY': apiKey,
+          'accept': 'application/json',
+          'x-chain': 'solana'
+        }
+      }
+    )
+    
+    if (!response.ok) {
+      console.error('[Hunter] BirdEye new listings error:', response.status)
+      return fetchDexScreenerProfiles()
+    }
+    
+    const json = await response.json()
+    
+    if (!json.success || !json.data?.items) {
+      return { items: [], sourceName: 'New Listings (no data)' }
+    }
+    
+    const items = json.data.items
+      .filter((t: any) => t.address) // Must have address
+      .map((t: any) => formatBirdeyeNewListing(t))
+    
+    // Cache results
+    sourceCache.set('newListings', { data: items, timestamp: Date.now() })
+    
+    return { items, sourceName: `New Listings (${items.length})` }
+  } catch (e) {
+    console.error('[Hunter] BirdEye new listings error:', e)
+    return fetchDexScreenerProfiles()
   }
-  
-  return symbol.startsWith('$') ? symbol : '$' + symbol
 }
 
-// === EXISTING SOURCES (kept for rotation) ===
+// =============================================================================
+// DEXSCREENER SOURCES (FREE - No API Key Needed)
+// =============================================================================
 
 async function fetchDexScreenerProfiles(): Promise<{ items: any[], sourceName: string }> {
+  // Check cache first
+  const cached = sourceCache.get('profiles')
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return { items: cached.data, sourceName: 'Profiles (cached)' }
+  }
+  
   try {
     const response = await fetch('https://api.dexscreener.com/token-profiles/latest/v1', { 
-      method: 'GET',
       headers: { 'Accept': 'application/json' }
     })
     const profiles = await response.json()
@@ -320,18 +253,62 @@ async function fetchDexScreenerProfiles(): Promise<{ items: any[], sourceName: s
     }
     
     const solanaTokens = profiles.filter((t: any) => t.chainId === 'solana')
-    const items = solanaTokens.slice(0, 25).map((t: any) => ({
-      address: t.tokenAddress,
-      symbol: extractSymbol(t),
-      name: t.header || 'Unknown',
-      logoURI: t.icon || null,
-      isNew: true,
-      source: 'dexscreener_profile',
-      liquidity: 0,
-      price: 0,
-    }))
+    const addresses = solanaTokens.slice(0, 30).map((t: any) => t.tokenAddress).filter(Boolean)
     
-    return { items, sourceName: `Profiles (${items.length})` }
+    // Enrich with pair data
+    const pairData = await fetchPairDataBatch(addresses)
+    
+    const items: any[] = []
+    const now = Date.now()
+    
+    for (const profile of solanaTokens.slice(0, 30)) {
+      const addr = profile.tokenAddress
+      const pair = pairData[addr]
+      
+      if (pair) {
+        const ageMs = pair.pairCreatedAt ? now - pair.pairCreatedAt : 0
+        items.push({
+          address: addr,
+          symbol: pair.baseToken?.symbol ? `$${pair.baseToken.symbol}` : extractSymbol(profile),
+          name: pair.baseToken?.name || profile.header || 'Unknown',
+          logoURI: profile.icon || pair.info?.imageUrl || null,
+          source: 'profile',
+          isNewborn: ageMs > 0 && ageMs < 2 * 60 * 60 * 1000, // < 2 hours
+          ageMinutes: ageMs > 0 ? Math.round(ageMs / 60000) : undefined,
+          liquidity: pair.liquidity?.usd || 0,
+          price: parseFloat(pair.priceUsd) || 0,
+          priceChange5m: pair.priceChange?.m5 || 0,
+          priceChange1h: pair.priceChange?.h1 || 0,
+          volume1h: pair.volume?.h1 || 0,
+          txns: {
+            m5: pair.txns?.m5 || { buys: 0, sells: 0 },
+            h1: pair.txns?.h1 || { buys: 0, sells: 0 },
+          },
+          fdv: pair.fdv || 0,
+          pairAddress: pair.pairAddress,
+        })
+      } else {
+        // No pair data yet - still include for discovery
+        items.push({
+          address: addr,
+          symbol: extractSymbol(profile),
+          name: profile.header || 'Unknown',
+          logoURI: profile.icon || null,
+          source: 'profile',
+          isNewborn: true, // Assume new if no pair data
+        })
+      }
+    }
+    
+    // Filter for quality (some liquidity or very new)
+    const qualityItems = items.filter(t => 
+      (t.liquidity && t.liquidity >= 1000) || t.isNewborn
+    )
+    
+    // Cache results
+    sourceCache.set('profiles', { data: qualityItems, timestamp: Date.now() })
+    
+    return { items: qualityItems.slice(0, 20), sourceName: `Profiles (${qualityItems.length})` }
   } catch (e) {
     console.error('[Hunter] Profiles error:', e)
     return { items: [], sourceName: 'Profiles (error)' }
@@ -339,9 +316,14 @@ async function fetchDexScreenerProfiles(): Promise<{ items: any[], sourceName: s
 }
 
 async function fetchDexScreenerBoosts(): Promise<{ items: any[], sourceName: string }> {
+  // Check cache first
+  const cached = sourceCache.get('boosts')
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return { items: cached.data, sourceName: 'Boosts (cached)' }
+  }
+  
   try {
     const response = await fetch('https://api.dexscreener.com/token-boosts/latest/v1', { 
-      method: 'GET',
       headers: { 'Accept': 'application/json' }
     })
     const boosts = await response.json()
@@ -351,60 +333,232 @@ async function fetchDexScreenerBoosts(): Promise<{ items: any[], sourceName: str
     }
     
     const solanaTokens = boosts.filter((t: any) => t.chainId === 'solana')
-    const items = solanaTokens.slice(0, 25).map((t: any) => ({
-      address: t.tokenAddress,
-      symbol: extractSymbol(t),
-      name: t.header || 'Unknown',
-      logoURI: t.icon || null,
-      isNew: true,
-      source: 'dexscreener_boost',
-      boostAmount: t.amount || t.totalAmount || 0,
-      liquidity: 0,
-      price: 0,
-    }))
+    const addresses = solanaTokens.slice(0, 30).map((t: any) => t.tokenAddress).filter(Boolean)
     
-    return { items, sourceName: `Boosts (${items.length})` }
+    // Enrich with pair data
+    const pairData = await fetchPairDataBatch(addresses)
+    
+    const items: any[] = []
+    const now = Date.now()
+    
+    for (const boost of solanaTokens.slice(0, 30)) {
+      const addr = boost.tokenAddress
+      const pair = pairData[addr]
+      
+      if (pair) {
+        const ageMs = pair.pairCreatedAt ? now - pair.pairCreatedAt : 0
+        const liq = pair.liquidity?.usd || 0
+        const txns1h = (pair.txns?.h1?.buys || 0) + (pair.txns?.h1?.sells || 0)
+        
+        // Boosted tokens with decent activity
+        if (liq >= 5000 || txns1h >= 10) {
+          items.push({
+            address: addr,
+            symbol: pair.baseToken?.symbol ? `$${pair.baseToken.symbol}` : extractSymbol(boost),
+            name: pair.baseToken?.name || boost.header || 'Unknown',
+            logoURI: boost.icon || pair.info?.imageUrl || null,
+            source: 'boost',
+            isHighVolume: txns1h >= 50,
+            boostAmount: boost.amount || boost.totalAmount || 0,
+            ageMinutes: ageMs > 0 ? Math.round(ageMs / 60000) : undefined,
+            liquidity: liq,
+            price: parseFloat(pair.priceUsd) || 0,
+            priceChange5m: pair.priceChange?.m5 || 0,
+            priceChange1h: pair.priceChange?.h1 || 0,
+            volume1h: pair.volume?.h1 || 0,
+            txns: {
+              m5: pair.txns?.m5 || { buys: 0, sells: 0 },
+              h1: pair.txns?.h1 || { buys: 0, sells: 0 },
+            },
+            fdv: pair.fdv || 0,
+            pairAddress: pair.pairAddress,
+          })
+        }
+      }
+    }
+    
+    // Sort by boost amount (most boosted first)
+    items.sort((a, b) => (b.boostAmount || 0) - (a.boostAmount || 0))
+    
+    // Cache results
+    sourceCache.set('boosts', { data: items, timestamp: Date.now() })
+    
+    return { items: items.slice(0, 20), sourceName: `Boosts (${items.length})` }
   } catch (e) {
     console.error('[Hunter] Boosts error:', e)
     return { items: [], sourceName: 'Boosts (error)' }
   }
 }
 
-async function fetchBirdeyeTrending(apiKey: string): Promise<{ items: any[], sourceName: string }> {
-  if (!apiKey) {
-    return { items: [], sourceName: 'Birdeye (no API key)' }
+async function fetchDexScreenerGainers(): Promise<{ items: any[], sourceName: string }> {
+  // Check cache first
+  const cached = sourceCache.get('gainers')
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+    return { items: cached.data, sourceName: 'Gainers (cached)' }
   }
   
   try {
-    const response = await fetch('https://public-api.birdeye.so/defi/token_trending?sort_by=rank&sort_type=asc&offset=0&limit=20', {
-      method: 'GET',
-      headers: {
-        'X-API-KEY': apiKey,
-        'accept': 'application/json',
-        'x-chain': 'solana'
-      }
+    // Get tokens from boosts but sort by price change
+    const response = await fetch('https://api.dexscreener.com/token-boosts/top/v1', { 
+      headers: { 'Accept': 'application/json' }
     })
-    const json = await response.json()
+    const boosts = await response.json()
     
-    if (!json.success || !json.data?.tokens) {
-      return { items: [], sourceName: 'Birdeye (no data)' }
+    if (!Array.isArray(boosts)) {
+      // Fallback to profiles
+      return fetchDexScreenerProfiles()
     }
     
-    const items = json.data.tokens.map((t: any) => ({
-      address: t.address,
-      symbol: t.symbol ? `$${t.symbol}` : '$UNK',
-      name: t.name,
-      logoURI: t.logoURI,
-      rank: t.rank,
-      isNew: false,
-      source: 'birdeye_trending',
-      liquidity: t.liquidity || 0,
-      price: t.price || 0,
-    }))
+    const solanaTokens = boosts.filter((t: any) => t.chainId === 'solana')
+    const addresses = solanaTokens.slice(0, 40).map((t: any) => t.tokenAddress).filter(Boolean)
     
-    return { items, sourceName: `Birdeye Trending (${items.length})` }
+    // Enrich with pair data
+    const pairData = await fetchPairDataBatch(addresses)
+    
+    const items: any[] = []
+    const now = Date.now()
+    
+    for (const token of solanaTokens.slice(0, 40)) {
+      const addr = token.tokenAddress
+      const pair = pairData[addr]
+      
+      if (pair) {
+        const liq = pair.liquidity?.usd || 0
+        const priceChange1h = pair.priceChange?.h1 || 0
+        const txns1h = (pair.txns?.h1?.buys || 0) + (pair.txns?.h1?.sells || 0)
+        const ageMs = pair.pairCreatedAt ? now - pair.pairCreatedAt : 0
+        
+        // High activity gainers
+        if (liq >= 10000 && txns1h >= 20) {
+          items.push({
+            address: addr,
+            symbol: pair.baseToken?.symbol ? `$${pair.baseToken.symbol}` : '$UNK',
+            name: pair.baseToken?.name || 'Unknown',
+            logoURI: token.icon || pair.info?.imageUrl || null,
+            source: 'gainer',
+            isHighVolume: true,
+            ageMinutes: ageMs > 0 ? Math.round(ageMs / 60000) : undefined,
+            liquidity: liq,
+            price: parseFloat(pair.priceUsd) || 0,
+            priceChange5m: pair.priceChange?.m5 || 0,
+            priceChange1h: priceChange1h,
+            volume1h: pair.volume?.h1 || 0,
+            txns: {
+              m5: pair.txns?.m5 || { buys: 0, sells: 0 },
+              h1: pair.txns?.h1 || { buys: 0, sells: 0 },
+            },
+            fdv: pair.fdv || 0,
+            pairAddress: pair.pairAddress,
+          })
+        }
+      }
+    }
+    
+    // Sort by 1h price change (biggest gainers first)
+    items.sort((a, b) => (b.priceChange1h || 0) - (a.priceChange1h || 0))
+    
+    // Cache results
+    sourceCache.set('gainers', { data: items, timestamp: Date.now() })
+    
+    return { items: items.slice(0, 20), sourceName: `Gainers (${items.length})` }
   } catch (e) {
-    console.error('[Hunter] Birdeye error:', e)
-    return { items: [], sourceName: 'Birdeye (error)' }
+    console.error('[Hunter] Gainers error:', e)
+    return { items: [], sourceName: 'Gainers (error)' }
   }
+}
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+function formatBirdeyeToken(t: any, source: string): any {
+  return {
+    address: t.address,
+    symbol: t.symbol ? `$${t.symbol}` : '$UNK',
+    name: t.name || 'Unknown',
+    logoURI: t.logoURI || t.logo || null,
+    source,
+    rank: t.rank,
+    liquidity: t.liquidity || 0,
+    price: t.price || 0,
+    priceChange24h: t.priceChange24hPercent || 0,
+    volume24h: t.volume24hUSD || t.v24hUSD || 0,
+    mc: t.mc || t.marketCap || 0,
+  }
+}
+
+function formatBirdeyeNewListing(t: any): any {
+  const now = Date.now()
+  const listTime = t.listTime ? t.listTime * 1000 : now // listTime is in seconds
+  const ageMs = now - listTime
+  
+  return {
+    address: t.address,
+    symbol: t.symbol ? `$${t.symbol}` : '$UNK',
+    name: t.name || 'Unknown',
+    logoURI: t.logoURI || t.logo || null,
+    source: 'newListing',
+    isNewborn: true,
+    ageMinutes: Math.round(ageMs / 60000),
+    liquidity: t.liquidity || 0,
+    price: t.price || 0,
+    mc: t.mc || t.marketCap || 0,
+    // Meme platform info
+    memeplatform: t.memeplatform,
+  }
+}
+
+async function fetchPairDataBatch(addresses: string[]): Promise<Record<string, any>> {
+  const results: Record<string, any> = {}
+  if (addresses.length === 0) return results
+  
+  // DexScreener allows up to 30 addresses per request
+  for (let i = 0; i < addresses.length; i += 30) {
+    const chunk = addresses.slice(i, i + 30)
+    try {
+      const response = await fetch(
+        `https://api.dexscreener.com/tokens/v1/solana/${chunk.join(',')}`,
+        { headers: { 'Accept': 'application/json' } }
+      )
+      const pairs = await response.json()
+      
+      if (Array.isArray(pairs)) {
+        for (const pair of pairs) {
+          const addr = pair.baseToken?.address
+          if (!addr) continue
+          // Keep pair with highest liquidity
+          const liq = pair.liquidity?.usd || 0
+          if (!results[addr] || liq > (results[addr].liquidity?.usd || 0)) {
+            results[addr] = pair
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[Hunter] Pair batch fetch error:', e)
+    }
+  }
+  
+  return results
+}
+
+function extractSymbol(item: any): string {
+  let symbol = 'UNK'
+  
+  // Try header
+  if (item.header && typeof item.header === 'string' && !item.header.startsWith('http')) {
+    symbol = item.header.split(/[\s\-–]/)[0].replace(/[^a-zA-Z0-9$]/g, '').toUpperCase()
+  }
+  
+  // Try description
+  if ((!symbol || symbol === 'UNK') && item.description) {
+    const match = item.description.match(/\$([A-Z0-9]+)/i)
+    if (match) symbol = match[1].toUpperCase()
+  }
+  
+  // Fallback to address prefix
+  if (!symbol || symbol === 'UNK') {
+    symbol = item.tokenAddress?.slice(0, 6)?.toUpperCase() || 'UNK'
+  }
+  
+  return symbol.startsWith('$') ? symbol : '$' + symbol
 }

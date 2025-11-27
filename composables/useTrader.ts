@@ -1,3 +1,14 @@
+/**
+ * useTrader.ts - Production Trading Bot Composable
+ *
+ * Integrates with:
+ * - Local PumpFun WebSocket stream (real-time, FREE)
+ * - DexScreener fallback (for tokens not in stream)
+ * - Custom scoring engines
+ *
+ * No BirdEye dependency - uses self-hosted data pipeline!
+ */
+
 import { ref, computed, watch } from "vue";
 import type {
   TokenData,
@@ -7,6 +18,7 @@ import type {
   BotStats,
 } from "~/types/trading";
 import { useScoringEngine } from "./useScoringEngine";
+import { useTokenQueue } from "./useTokenQueue";
 
 // === GLOBAL STATE ===
 const discoveryQueue = ref<TokenData[]>([]);
@@ -15,8 +27,19 @@ const rejectedTokens = ref<VerifiedToken[]>([]);
 const activeTrades = ref<Trade[]>([]);
 const tradeHistory = ref<Trade[]>([]);
 
+// === STREAM STATE ===
+const streamStatus = ref<{
+  connected: boolean;
+  tradesProcessed: number;
+  tokensTracked: number;
+  parsedFromLogs: number;
+  uptime: number;
+  solPrice: number;
+} | null>(null);
+
 // === CACHES & INTERNALS ===
 const checkedCache = ref<Map<string, number>>(new Map());
+const seenFromStream = ref<Set<string>>(new Set()); // Tokens discovered from stream
 const CACHE_TTL_MS = 2 * 60 * 1000;
 const VERIFIED_MAX_AGE_MS = 8 * 60 * 1000;
 const MAX_VERIFIED_POOL = 80;
@@ -26,16 +49,26 @@ const MAX_DISCOVERY_QUEUE = 500;
 const isAutoTrading = ref(false);
 const botSettings = ref<BotSettings>({
   buyAmount: 20,
-  takeProfit: 3,
-  stopLoss: 2,
+  takeProfit: 2,
+  stopLoss: 1.5,
   maxPositions: 5,
   minScore: 65,
 
+  // Memecoin settings
+  maxHoldTimeSeconds: 180,
+  useShortTimeframes: true,
+  scaledTakeProfit: {
+    tp1Percent: 0.8,
+    tp1Size: 50,
+    tp2Percent: 1.8,
+    tp2Size: 50,
+  },
+
   newborn: {
     maxAgeMinutes: 120,
-    minLiquidity: 1000,
-    maxLiquidity: 50000,
-    minTxns5m: 1,
+    minLiquidity: 5000,
+    maxLiquidity: 100000,
+    minTxns5m: 3,
   },
   established: {
     minLiquidity: 20000,
@@ -85,14 +118,20 @@ const stats = ref<BotStats>({
   establishedFound: 0,
   scoringCycles: 0,
   lastScoringTime: 0,
+  birdeyeCallsUsed: 0, // Now tracks stream API calls
+  dataQuality: "full",
+  streamHits: 0,
+  dexscreenerHits: 0,
 });
 
 // === TIMERS ===
 let portfolioTimer: ReturnType<typeof setInterval> | null = null;
 let discoveryTimer: ReturnType<typeof setInterval> | null = null;
+let streamDiscoveryTimer: ReturnType<typeof setInterval> | null = null;
 let sieveTimer: ReturnType<typeof setTimeout> | null = null;
 let scoringTimer: ReturnType<typeof setInterval> | null = null;
 let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+let streamStatusTimer: ReturnType<typeof setInterval> | null = null;
 
 export const useTrader = () => {
   // === SCORING ENGINE ===
@@ -107,6 +146,18 @@ export const useTrader = () => {
     saveEnginePreference,
   } = useScoringEngine();
 
+  // === TOKEN QUEUE (Uses local stream with DexScreener fallback) ===
+  const {
+    addToQueue,
+    addBatchToQueue,
+    fetchImmediate,
+    startProcessor,
+    stopProcessor,
+    toTokenData,
+    getCachedData,
+    queueStats,
+  } = useTokenQueue();
+
   // === LOGGING ===
   const log = (
     msg: string,
@@ -118,7 +169,8 @@ export const useTrader = () => {
       | "trade"
       | "scan"
       | "score"
-      | "newborn" = "info"
+      | "newborn"
+      | "stream" = "info"
   ) => {
     const time = new Date().toLocaleTimeString();
     const prefix = {
@@ -130,8 +182,13 @@ export const useTrader = () => {
       score: "🎯",
       info: "ℹ️",
       newborn: "🐣",
+      stream: "🌊",
     }[type];
-    botLogs.value.unshift(`[${time}] ${prefix} ${msg}`);
+
+    // Avoid duplicate emojis - remove leading emoji if message already starts with one
+    const cleanMsg = msg.replace(/^[🌊📡🎯🐣📈💰✅❌⚠️ℹ️]\s*/, "");
+
+    botLogs.value.unshift(`[${time}] ${prefix} ${cleanMsg}`);
     if (botLogs.value.length > 300) botLogs.value.pop();
   };
 
@@ -147,6 +204,8 @@ export const useTrader = () => {
   const formatPrice = (num: number | string) => {
     const n = Number(num);
     if (!n || isNaN(n)) return "0.000000";
+    if (n < 0.00000001) return n.toExponential(2);
+    if (n < 0.0001) return n.toFixed(10);
     return n < 0.01 ? n.toFixed(8) : n.toFixed(4);
   };
 
@@ -162,7 +221,7 @@ export const useTrader = () => {
   };
 
   const getExplorerLink = (address: string) =>
-    `https://birdeye.so/token/${address}?chain=solana`;
+    `https://pump.fun/coin/${address}`;
 
   // === COMPUTED ===
   const totalPortfolioValue = computed(() => {
@@ -182,7 +241,13 @@ export const useTrader = () => {
   const historyStats = computed(() => {
     const closed = tradeHistory.value || [];
     if (closed.length === 0)
-      return { realizedPnL: 0, winRate: 0, avgReturn: 0, totalTrades: 0 };
+      return {
+        realizedPnL: 0,
+        winRate: 0,
+        avgReturn: 0,
+        totalTrades: 0,
+        avgHoldTime: 0,
+      };
 
     const realizedPnL = closed.reduce((acc, t) => acc + (t.pnl || 0), 0);
     const wins = closed.filter((t) => (t.pnl || 0) > 0).length;
@@ -190,71 +255,182 @@ export const useTrader = () => {
     const avgReturn =
       closed.reduce((acc, t) => {
         if (!t.exitPrice || !t.entryPrice) return acc;
-        return acc + (((t.exitPrice - t.entryPrice) / t.entryPrice) * 100);
+        return acc + ((t.exitPrice - t.entryPrice) / t.entryPrice) * 100;
       }, 0) / closed.length;
 
-    return { realizedPnL, winRate, avgReturn, totalTrades: closed.length };
+    const avgHoldTime =
+      closed.reduce((acc, t) => {
+        if (t.closedAt && t.timestamp) {
+          return acc + (t.closedAt - t.timestamp) / 1000;
+        }
+        return acc;
+      }, 0) / (closed.length || 1);
+
+    return {
+      realizedPnL,
+      winRate,
+      avgReturn,
+      totalTrades: closed.length,
+      avgHoldTime,
+    };
   });
 
+  // === STREAM STATUS ===
+  const updateStreamStatus = async () => {
+    try {
+      const res = await fetch("/api/stream/status");
+      const json = await res.json();
+
+      if (json.success && json.data) {
+        const s = json.data.stream;
+        const c = json.data.candles;
+        const p = json.data.prices;
+
+        streamStatus.value = {
+          connected: s.connected,
+          tradesProcessed: s.tradesProcessed,
+          tokensTracked: c.totalTokens,
+          parsedFromLogs: s.parsedFromLogs || 0,
+          uptime: s.uptime,
+          solPrice: p.solUsd,
+        };
+
+        stats.value.dataQuality = s.connected ? "realtime" : "delayed";
+      }
+    } catch (e) {
+      streamStatus.value = null;
+      stats.value.dataQuality = "fallback";
+    }
+  };
+
   // === DATA FETCHING ===
+  const fetchTokenData = async (
+    address: string,
+    priority: "critical" | "high" | "normal" | "low" = "normal"
+  ): Promise<TokenData | null> => {
+    const streamData = await addToQueue(address, priority);
+    if (!streamData) return null;
+
+    // Track data source
+    if (streamData.source === "local-stream") {
+      stats.value.streamHits = (stats.value.streamHits || 0) + 1;
+    } else {
+      stats.value.dexscreenerHits = (stats.value.dexscreenerHits || 0) + 1;
+    }
+    stats.value.birdeyeCallsUsed = (stats.value.birdeyeCallsUsed || 0) + 1;
+
+    return toTokenData(streamData);
+  };
+
   const fetchBatchTokenData = async (
-    addresses: string[]
+    addresses: string[],
+    priority: "critical" | "high" | "normal" | "low" = "normal"
   ): Promise<Record<string, TokenData>> => {
-    if (addresses.length === 0) return {};
     const results: Record<string, TokenData> = {};
-    const chunkSize = 30;
 
-    for (let i = 0; i < addresses.length; i += chunkSize) {
-      const chunk = addresses.slice(i, i + chunkSize);
-      try {
-        const response = await fetch(
-          `https://api.dexscreener.com/tokens/v1/solana/${chunk.join(",")}`,
-          { headers: { Accept: "application/json" } }
-        );
-        const pairs = await response.json();
+    const dataMap = await addBatchToQueue(addresses, priority);
 
-        if (Array.isArray(pairs)) {
-          const tokenMap: Record<string, any> = {};
-          for (const pair of pairs) {
-            const addr = pair.baseToken?.address;
-            if (!addr) continue;
-            const liq = pair.liquidity?.usd || 0;
-            if (!tokenMap[addr] || liq > (tokenMap[addr].liquidity?.usd || 0)) {
-              tokenMap[addr] = pair;
-            }
-          }
+    for (const [address, streamData] of dataMap.entries()) {
+      if (streamData) {
+        results[address] = toTokenData(streamData);
 
-          for (const [addr, pair] of Object.entries(tokenMap)) {
-            const ageMs = pair.pairCreatedAt
-              ? Date.now() - pair.pairCreatedAt
-              : Infinity;
-            results[addr] = {
-              address: addr,
-              symbol: pair.baseToken?.symbol || "UNK",
-              name: pair.baseToken?.name,
-              price: parseFloat(pair.priceUsd) || 0,
-              liquidity: pair.liquidity?.usd || 0,
-              fdv: pair.fdv || 0,
-              ageMinutes: Math.round(ageMs / 60000),
-              ageHours: Math.round((ageMs / (1000 * 60 * 60)) * 10) / 10,
-              priceChange5m: pair.priceChange?.m5 || 0,
-              priceChange1h: pair.priceChange?.h1 || 0,
-              volume5m: pair.volume?.m5 || 0,
-              volume1h: pair.volume?.h1 || 0,
-              txns5m: pair.txns?.m5 || { buys: 0, sells: 0 },
-              txns1h: pair.txns?.h1 || { buys: 0, sells: 0 },
-              pairCreatedAt: pair.pairCreatedAt,
-            };
-          }
+        // Track source
+        if (streamData.source === "local-stream") {
+          stats.value.streamHits = (stats.value.streamHits || 0) + 1;
+        } else {
+          stats.value.dexscreenerHits = (stats.value.dexscreenerHits || 0) + 1;
         }
-      } catch (e) {
-        console.error("Batch fetch error:", e);
+        stats.value.birdeyeCallsUsed = (stats.value.birdeyeCallsUsed || 0) + 1;
       }
     }
+
     return results;
   };
 
-  // === DISCOVERY ===
+  // === STREAM-BASED DISCOVERY ===
+  const discoverFromStream = async () => {
+    try {
+      // Get global recent trades from our stream
+      const res = await fetch("/api/stream/trades?global=true&limit=100");
+      const json = await res.json();
+
+      if (!json.success || !json.data) return;
+
+      const trades = json.data;
+      const now = Date.now();
+      let addedCount = 0;
+
+      // Extract unique tokens from recent trades
+      const recentTokens = new Map<
+        string,
+        {
+          mint: string;
+          price: number;
+          solAmount: number;
+          isBuy: boolean;
+          timestamp: number;
+        }
+      >();
+
+      for (const trade of trades) {
+        if (!trade.mint) continue;
+
+        // Skip if already processed
+        if (checkedCache.value.has(trade.mint)) continue;
+        if (verifiedTokens.value.some((v) => v.address === trade.mint))
+          continue;
+        if (discoveryQueue.value.some((d) => d.address === trade.mint))
+          continue;
+        if (activeTrades.value.some((t) => t.address === trade.mint)) continue;
+        if (seenFromStream.value.has(trade.mint)) continue;
+
+        // Track this token
+        if (!recentTokens.has(trade.mint)) {
+          recentTokens.set(trade.mint, trade);
+        }
+      }
+
+      // Add new tokens to discovery queue
+      for (const [mint, trade] of recentTokens) {
+        seenFromStream.value.add(mint);
+
+        // Create minimal token data - will be enriched in sieve
+        const token: TokenData = {
+          address: mint,
+          symbol: mint.slice(0, 6) + "...",
+          name: "",
+          price: trade.price,
+          logoURI: "",
+          discoveredAt: now,
+          source: "stream",
+          isNewborn: true, // Assume newborn since it's actively trading on PumpFun
+        };
+
+        discoveryQueue.value.push(token);
+        addedCount++;
+        stats.value.totalDiscovered++;
+      }
+
+      // Trim discovery queue
+      if (discoveryQueue.value.length > MAX_DISCOVERY_QUEUE) {
+        discoveryQueue.value = discoveryQueue.value.slice(-MAX_DISCOVERY_QUEUE);
+      }
+
+      // Trim seen set
+      if (seenFromStream.value.size > 5000) {
+        const arr = Array.from(seenFromStream.value);
+        seenFromStream.value = new Set(arr.slice(-2500));
+      }
+
+      if (addedCount > 0) {
+        log(`🌊 Stream: +${addedCount} new tokens from live trades`, "stream");
+      }
+    } catch (e) {
+      console.error("Stream discovery error:", e);
+    }
+  };
+
+  // === TRADITIONAL DISCOVERY (DexScreener/Hunter) ===
   const runDiscovery = async () => {
     try {
       const res = await fetch("/api/hunter?type=auto");
@@ -283,13 +459,16 @@ export const useTrader = () => {
           discoveryQueue.value.push({
             ...token,
             discoveredAt: now,
+            source: "hunter",
           } as TokenData);
           addedCount++;
           stats.value.totalDiscovered++;
         }
 
         if (discoveryQueue.value.length > MAX_DISCOVERY_QUEUE) {
-          discoveryQueue.value = discoveryQueue.value.slice(-MAX_DISCOVERY_QUEUE);
+          discoveryQueue.value = discoveryQueue.value.slice(
+            -MAX_DISCOVERY_QUEUE
+          );
         }
 
         if (addedCount > 0) {
@@ -298,7 +477,7 @@ export const useTrader = () => {
           if (establishedCount > 0)
             sourceInfo.push(`${establishedCount} active`);
           log(
-            `${json.source}: +${addedCount} (${sourceInfo.join(", ") || "mixed"})`,
+            `📡 Hunter: +${addedCount} (${sourceInfo.join(", ") || "mixed"})`,
             "scan"
           );
         }
@@ -308,10 +487,13 @@ export const useTrader = () => {
     }
   };
 
-  // === SIEVE ===
+  // === SIEVE (Process Discovery Queue) ===
   const processSieveItem = async () => {
     if (discoveryQueue.value.length === 0) {
-      currentChecking.value = "Queue empty...";
+      const streamInfo = streamStatus.value?.connected
+        ? `🌊 ${streamStatus.value.tokensTracked} tracked`
+        : "⚠️ Stream offline";
+      currentChecking.value = `Queue empty | ${streamInfo} | Cache: ${queueStats.value.cacheSize}`;
       return;
     }
 
@@ -319,18 +501,22 @@ export const useTrader = () => {
     const now = Date.now();
     checkedCache.value.set(token.address, now);
     stats.value.totalChecked++;
-    currentChecking.value = `Checking: ${token.symbol}`;
+
+    const sourceTag = token.source === "stream" ? "🌊" : "📡";
+    currentChecking.value = `${sourceTag} Checking: ${
+      token.symbol || token.address.slice(0, 8)
+    }`;
 
     try {
-      const data = await fetchBatchTokenData([token.address]);
-      const freshData = data[token.address];
+      // Fetch fresh data from local stream (with DexScreener fallback)
+      const freshData = await fetchTokenData(token.address, "low");
 
       if (!freshData || !freshData.price) {
         const rejected: VerifiedToken = {
           ...token,
           score: 0,
           signal: "AVOID",
-          scoreReasons: [],
+          scoreReasons: ["No data available"],
           tokenType: "reject",
           rejectReason: "No data",
         };
@@ -344,55 +530,40 @@ export const useTrader = () => {
       const tokenType = classify(enrichedToken, botSettings.value);
 
       if (tokenType === "reject") {
-        const ageMinutes = enrichedToken.ageMinutes || 0;
-        const txns1h =
-          (enrichedToken.txns1h?.buys || 0) +
-          (enrichedToken.txns1h?.sells || 0);
-
-        let rejectReason: string;
-        if (
-          ageMinutes > botSettings.value.newborn.maxAgeMinutes &&
-          txns1h < botSettings.value.established.minTxns1h
-        ) {
-          rejectReason = `Dead coin: ${ageMinutes}m old, only ${txns1h} txns/h`;
-        } else if (ageMinutes <= botSettings.value.newborn.maxAgeMinutes) {
-          rejectReason = `Newborn but dead: no activity`;
-        } else {
-          rejectReason = `Low activity: ${txns1h} txns/h`;
-        }
+        const { reasons } = calculateScore(enrichedToken, botSettings.value);
 
         const rejected: VerifiedToken = {
           ...enrichedToken,
           score: 0,
           signal: "AVOID",
-          scoreReasons: [],
+          scoreReasons: reasons,
           tokenType: "reject",
-          rejectReason,
+          rejectReason: reasons[0] || "Does not meet criteria",
         };
         rejectedTokens.value.unshift(rejected);
         stats.value.totalRejected++;
         return;
       }
 
-      // Quick reject if 5m is negative
-      if (enrichedToken.priceChange5m < -1) {
+      // Calculate score
+      const { score, signal, reasons, maxSafePosition } = calculateScore(
+        enrichedToken,
+        botSettings.value
+      );
+
+      // Don't add to verified if immediate AVOID
+      if (signal === "AVOID") {
         const rejected: VerifiedToken = {
           ...enrichedToken,
-          score: 0,
+          score,
           signal: "AVOID",
-          scoreReasons: [],
+          scoreReasons: reasons,
           tokenType,
-          rejectReason: `Negative 5m: ${enrichedToken.priceChange5m.toFixed(1)}%`,
+          rejectReason: reasons[0] || "Failed scoring",
         };
         rejectedTokens.value.unshift(rejected);
         return;
       }
-
-      // Use scoring engine to calculate score
-      const { score, signal, reasons } = calculateScore(
-        enrichedToken,
-        botSettings.value
-      );
 
       const verified: VerifiedToken = {
         ...enrichedToken,
@@ -402,6 +573,8 @@ export const useTrader = () => {
         tokenType,
         scoreHistory: [{ score, time: now }],
         verifiedAt: now,
+        maxSafePosition,
+        dataSource: freshData.dataQuality === "full" ? "stream" : "dexscreener",
       };
 
       verifiedTokens.value.unshift(verified);
@@ -414,19 +587,31 @@ export const useTrader = () => {
         verifiedTokens.value = verifiedTokens.value.slice(0, MAX_VERIFIED_POOL);
       }
 
+      const txns1m =
+        (enrichedToken.txns1m?.buys || 0) + (enrichedToken.txns1m?.sells || 0);
       const txns5m =
         (enrichedToken.txns5m?.buys || 0) + (enrichedToken.txns5m?.sells || 0);
       const typeEmoji = tokenType === "newborn" ? "🐣" : "📈";
+      const srcEmoji = token.source === "stream" ? "🌊" : "";
+
       log(
-        `${typeEmoji} ${enrichedToken.symbol} | Score: ${score} | 5m: ${enrichedToken.priceChange5m > 0 ? "+" : ""}${enrichedToken.priceChange5m?.toFixed(1)}% | ${txns5m} txns`,
+        `${typeEmoji}${srcEmoji} ${enrichedToken.symbol} | Score: ${score} | ` +
+          `1m: ${(enrichedToken.priceChange1m || 0) > 0 ? "+" : ""}${(
+            enrichedToken.priceChange1m || 0
+          ).toFixed(1)}% | ` +
+          `5m: ${(enrichedToken.priceChange5m || 0) > 0 ? "+" : ""}${(
+            enrichedToken.priceChange5m || 0
+          ).toFixed(1)}% | ` +
+          `${txns1m}/${txns5m} txns`,
         "success"
       );
     } catch (e) {
+      console.error("Sieve error:", e);
       const rejected: VerifiedToken = {
         ...token,
         score: 0,
         signal: "AVOID",
-        scoreReasons: [],
+        scoreReasons: ["Processing error"],
         tokenType: "reject",
         rejectReason: "Error",
       };
@@ -442,13 +627,17 @@ export const useTrader = () => {
       isScoringRunning.value
     )
       return;
+
     isScoringRunning.value = true;
     const startTime = Date.now();
 
     try {
       const addresses = verifiedTokens.value.map((t) => t.address);
-      currentChecking.value = `Scoring ${addresses.length} tokens...`;
-      const freshData = await fetchBatchTokenData(addresses);
+      currentChecking.value = `🎯 Scoring ${addresses.length} tokens...`;
+
+      // Fetch fresh data (high priority for verified tokens)
+      const freshData = await fetchBatchTokenData(addresses, "high");
+
       const buySignals: VerifiedToken[] = [];
       const tokensToRemove: string[] = [];
 
@@ -460,14 +649,13 @@ export const useTrader = () => {
         Object.assign(token, data);
 
         // Use scoring engine
-        const { score, signal, reasons, tokenType } = calculateScore(
-          token,
-          botSettings.value
-        );
+        const { score, signal, reasons, tokenType, maxSafePosition } =
+          calculateScore(token, botSettings.value);
         token.score = score;
         token.signal = signal;
         token.scoreReasons = reasons;
         token.tokenType = tokenType;
+        token.maxSafePosition = maxSafePosition;
 
         if (token.scoreHistory) {
           token.scoreHistory.unshift({ score, time: Date.now() });
@@ -485,7 +673,11 @@ export const useTrader = () => {
         }
 
         // Remove dead or bad tokens
-        if (tokenType === "reject" || score < 20 || token.priceChange5m < -3) {
+        if (
+          tokenType === "reject" ||
+          score < 20 ||
+          (token.priceChange5m ?? 0) < -5
+        ) {
           tokensToRemove.push(token.address);
         }
       }
@@ -495,12 +687,20 @@ export const useTrader = () => {
 
       for (const token of buySignals) {
         if (activeTrades.value.length >= botSettings.value.maxPositions) break;
+
+        // Use recommended position size if available
+        const positionSize = token.maxSafePosition
+          ? Math.min(token.maxSafePosition, botSettings.value.buyAmount)
+          : botSettings.value.buyAmount;
+
         const typeEmoji = token.tokenType === "newborn" ? "🐣" : "📈";
         log(
-          `🎯 ${typeEmoji} SCALP: ${token.symbol} | Score: ${token.score} | 5m: +${token.priceChange5m?.toFixed(1)}%`,
+          `🎯 ${typeEmoji} SCALP: ${token.symbol} | Score: ${token.score} | ` +
+            `1m: +${(token.priceChange1m || 0).toFixed(1)}% | ` +
+            `5m: +${(token.priceChange5m || 0).toFixed(1)}%`,
           "score"
         );
-        await executeTradeAction(token, botSettings.value.buyAmount, true);
+        await executeTradeAction(token, positionSize, true);
         tokensToRemove.push(token.address);
       }
 
@@ -516,7 +716,12 @@ export const useTrader = () => {
       console.error("Batch scoring error", e);
     } finally {
       isScoringRunning.value = false;
-      currentChecking.value = `Scored ${verifiedTokens.value.length} tokens`;
+      const streamInfo = streamStatus.value?.connected ? "🌊" : "⚠️";
+      currentChecking.value =
+        `${streamInfo} Scored ${verifiedTokens.value.length} | ` +
+        `Stream: ${stats.value.streamHits || 0} | Dex: ${
+          stats.value.dexscreenerHits || 0
+        }`;
     }
   };
 
@@ -545,7 +750,9 @@ export const useTrader = () => {
         const typeEmoji = token.tokenType === "newborn" ? "🐣" : "📈";
         if (isAuto) {
           log(
-            `${typeEmoji} BUY: $${amount} ${token.symbol} @ $${formatPrice(safePrice)}`,
+            `${typeEmoji} BUY: $${amount} ${token.symbol} @ $${formatPrice(
+              safePrice
+            )}`,
             "trade"
           );
         } else {
@@ -561,7 +768,10 @@ export const useTrader = () => {
     }
   };
 
-  const closePosition = async (trade: Trade, reason: string = "Manual Close") => {
+  const closePosition = async (
+    trade: Trade,
+    reason: string = "Manual Close"
+  ) => {
     try {
       const res = await fetch("/api/trade", {
         method: "POST",
@@ -577,8 +787,13 @@ export const useTrader = () => {
       if (result.success) {
         await fetchPortfolio();
         const pnlPct = trade.pnlPercent || 0;
+        const holdTime = trade.holdTimeSeconds
+          ? `${trade.holdTimeSeconds}s`
+          : "";
         log(
-          `SELL: ${trade.symbol} | ${reason} | ${pnlPct.toFixed(2)}%`,
+          `SELL: ${trade.symbol} | ${reason} | ${
+            pnlPct >= 0 ? "+" : ""
+          }${pnlPct.toFixed(2)}% ${holdTime}`,
           pnlPct >= 0 ? "success" : "warn"
         );
       }
@@ -603,11 +818,16 @@ export const useTrader = () => {
 
     try {
       const addresses = activeTrades.value.map((t) => t.address);
-      const freshData = await fetchBatchTokenData(addresses);
+
+      // CRITICAL priority for active positions
+      const freshData = await fetchBatchTokenData(addresses, "critical");
+
       const toClose: { trade: Trade; reason: string }[] = [];
+      const now = Date.now();
 
       activeTrades.value.forEach((trade) => {
         const data = freshData[trade.address];
+
         if (data?.price) {
           trade.currentPrice = data.price;
           trade.currentValue =
@@ -615,8 +835,13 @@ export const useTrader = () => {
           trade.pnl = trade.currentValue - trade.amount;
           trade.pnlPercent =
             ((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
+          trade.holdTimeSeconds = Math.floor((now - trade.timestamp) / 1000);
+
+          // Update with fresh data
+          trade.priceChange1m = data.priceChange1m;
           trade.priceChange5m = data.priceChange5m;
           trade.priceChange1h = data.priceChange1h;
+          trade.txns1m = data.txns1m;
           trade.txns5m = data.txns5m;
 
           if (isAutoTrading.value) {
@@ -634,20 +859,57 @@ export const useTrader = () => {
                 reason: `SL ${trade.pnlPercent.toFixed(1)}%`,
               });
             }
-            // MOMENTUM EXIT
-            else if (trade.priceChange5m < -2 && trade.pnlPercent < 0) {
+            // MAX HOLD TIME
+            else if (
+              botSettings.value.maxHoldTimeSeconds &&
+              trade.holdTimeSeconds >= botSettings.value.maxHoldTimeSeconds
+            ) {
               toClose.push({
                 trade,
-                reason: `Momentum exit: 5m ${trade.priceChange5m.toFixed(1)}%`,
+                reason: `Max hold: ${trade.holdTimeSeconds}s`,
               });
             }
-            // SELL PRESSURE EXIT
+            // 1-MINUTE MOMENTUM EXIT
+            else if (
+              trade.priceChange1m !== undefined &&
+              trade.priceChange1m < -1.5 &&
+              trade.pnlPercent < 0.3
+            ) {
+              toClose.push({
+                trade,
+                reason: `1m dump: ${trade.priceChange1m.toFixed(1)}%`,
+              });
+            }
+            // 5-MINUTE MOMENTUM EXIT
+            else if (
+              trade.priceChange5m !== undefined &&
+              trade.priceChange5m < -3 &&
+              trade.pnlPercent < 0
+            ) {
+              toClose.push({
+                trade,
+                reason: `5m momentum: ${trade.priceChange5m.toFixed(1)}%`,
+              });
+            }
+            // 1-MINUTE SELL PRESSURE
+            else if (
+              trade.txns1m &&
+              trade.txns1m.sells > 0 &&
+              trade.txns1m.sells > trade.txns1m.buys * 2 &&
+              trade.pnlPercent < 0.5
+            ) {
+              toClose.push({
+                trade,
+                reason: `1m sells: ${trade.txns1m.buys}B/${trade.txns1m.sells}S`,
+              });
+            }
+            // 5-MINUTE SELL PRESSURE
             else if (
               trade.txns5m &&
-              trade.txns5m.sells > trade.txns5m.buys * 2 &&
+              trade.txns5m.sells > trade.txns5m.buys * 2.5 &&
               trade.pnlPercent < 1
             ) {
-              toClose.push({ trade, reason: `Sell pressure detected` });
+              toClose.push({ trade, reason: `5m sell pressure` });
             }
           }
         }
@@ -672,6 +934,7 @@ export const useTrader = () => {
         pnl: 0,
         pnlPercent: 0,
         currentValue: t.amount,
+        holdTimeSeconds: Math.floor((Date.now() - t.timestamp) / 1000),
       }));
 
       tradeHistory.value = json.history || [];
@@ -685,48 +948,84 @@ export const useTrader = () => {
   const runCleanup = () => {
     const now = Date.now();
 
+    // Clean checked cache
     for (const [addr, time] of checkedCache.value.entries()) {
       if (now - time > CACHE_TTL_MS) checkedCache.value.delete(addr);
     }
 
+    // Clean verified tokens
     verifiedTokens.value = verifiedTokens.value.filter(
       (t) => now - (t.verifiedAt || 0) < VERIFIED_MAX_AGE_MS
     );
 
+    // Trim rejected tokens
     if (rejectedTokens.value.length > 100) {
       rejectedTokens.value = rejectedTokens.value.slice(0, 100);
     }
   };
 
   // === BOT CONTROLS ===
-  const startBot = () => {
+  const startBot = async () => {
     if (isAutoTrading.value) return;
+
+    // Start processor
+    startProcessor();
+
     isAutoTrading.value = true;
     stats.value.scoringCycles = 0;
     stats.value.newbornFound = 0;
     stats.value.establishedFound = 0;
+    stats.value.birdeyeCallsUsed = 0;
+    stats.value.streamHits = 0;
+    stats.value.dexscreenerHits = 0;
+
+    // Check stream status first
+    await updateStreamStatus();
+
+    const streamInfo = streamStatus.value?.connected
+      ? `🌊 Stream: ${streamStatus.value.tokensTracked} tokens tracked`
+      : "⚠️ Stream offline - using DexScreener";
+
     log(
       `🤖 SCALP BOT STARTED [${engineName.value} v${engineVersion.value}]`,
       "success"
     );
+    log(streamInfo, streamStatus.value?.connected ? "stream" : "warn");
 
+    // Initial data load
     fetchPortfolio();
+
+    // Run both discovery methods
     runDiscovery();
+    discoverFromStream();
 
-    discoveryTimer = setInterval(runDiscovery, 10000);
+    // Traditional discovery every 15s
+    discoveryTimer = setInterval(runDiscovery, 15000);
 
+    // Stream discovery every 5s (faster since it's our real-time data)
+    streamDiscoveryTimer = setInterval(discoverFromStream, 5000);
+
+    // Stream status every 30s
+    streamStatusTimer = setInterval(updateStreamStatus, 30000);
+
+    // Sieve - process discovery queue
     isSieveRunning.value = true;
     const sieveLoop = async () => {
       if (!isAutoTrading.value) return;
       await processSieveItem();
-      sieveTimer = setTimeout(sieveLoop, 200);
+      // Fast sieve - no rate limiting needed with local stream!
+      sieveTimer = setTimeout(sieveLoop, 80);
     };
     sieveLoop();
 
+    // Scoring every 2s
     scoringTimer = setInterval(runBatchScoring, 2000);
     setTimeout(runBatchScoring, 1500);
 
-    portfolioTimer = setInterval(refreshPortfolioPrices, 3000);
+    // Portfolio refresh every 1.5s (critical for exits)
+    portfolioTimer = setInterval(refreshPortfolioPrices, 1500);
+
+    // Cleanup every 30s
     cleanupTimer = setInterval(runCleanup, 30000);
   };
 
@@ -734,15 +1033,57 @@ export const useTrader = () => {
     isAutoTrading.value = false;
     isSieveRunning.value = false;
     currentChecking.value = "Stopped";
+
+    // Stop processor
+    stopProcessor();
+
     log("🛑 SCALP BOT STOPPED", "warn");
 
+    // Log session stats
+    const sessionStats =
+      `Session: ${stats.value.totalDiscovered} discovered | ` +
+      `${stats.value.totalVerified} verified | ` +
+      `${stats.value.totalBought} bought | ` +
+      `Stream: ${stats.value.streamHits || 0} | Dex: ${
+        stats.value.dexscreenerHits || 0
+      }`;
+    log(sessionStats, "info");
+
+    // Clear all timers
     if (discoveryTimer) clearInterval(discoveryTimer);
+    if (streamDiscoveryTimer) clearInterval(streamDiscoveryTimer);
     if (sieveTimer) clearTimeout(sieveTimer);
     if (scoringTimer) clearInterval(scoringTimer);
     if (portfolioTimer) clearInterval(portfolioTimer);
     if (cleanupTimer) clearInterval(cleanupTimer);
+    if (streamStatusTimer) clearInterval(streamStatusTimer);
+
+    discoveryTimer = null;
+    streamDiscoveryTimer = null;
+    sieveTimer = null;
+    scoringTimer = null;
+    portfolioTimer = null;
+    cleanupTimer = null;
+    streamStatusTimer = null;
   };
 
+  // === MANUAL STREAM CHECK ===
+  const checkStreamStatus = async () => {
+    await updateStreamStatus();
+
+    if (streamStatus.value?.connected) {
+      log(
+        `🌊 Stream: ${streamStatus.value.tradesProcessed} trades | ` +
+          `${streamStatus.value.tokensTracked} tokens | ` +
+          `SOL: $${streamStatus.value.solPrice?.toFixed(2)}`,
+        "stream"
+      );
+    } else {
+      log(`⚠️ Stream offline - using DexScreener fallback`, "warn");
+    }
+  };
+
+  // === MODAL CONTROLS ===
   const openBuyModal = (token: VerifiedToken) => {
     selectedToken.value = { ...token };
     showBuyModal.value = true;
@@ -778,7 +1119,7 @@ export const useTrader = () => {
     () => {
       if (typeof window !== "undefined") {
         localStorage.setItem(
-          "alex_bot_settings_v2",
+          "alex_bot_settings_v5",
           JSON.stringify(botSettings.value)
         );
       }
@@ -788,7 +1129,7 @@ export const useTrader = () => {
 
   // === LOAD SETTINGS ===
   if (typeof window !== "undefined") {
-    const saved = localStorage.getItem("alex_bot_settings_v2");
+    const saved = localStorage.getItem("alex_bot_settings_v5");
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
@@ -803,6 +1144,9 @@ export const useTrader = () => {
         console.error("Failed to load settings", e);
       }
     }
+
+    // Initial stream status check
+    updateStreamStatus();
   }
 
   return {
@@ -827,6 +1171,8 @@ export const useTrader = () => {
     stats,
     isScoringRunning,
     isSieveRunning,
+    queueStats,
+    streamStatus,
 
     // Scoring Engine
     engineName,
@@ -846,11 +1192,12 @@ export const useTrader = () => {
     removeFromVerified,
     openSettingsModal,
     closeSettingsModal,
+    checkStreamStatus,
 
     // Utilities
     formatVal,
     formatPrice,
     formatTimeAgo,
     getExplorerLink,
-};
+  };
 };
