@@ -1,14 +1,18 @@
 /**
  * Helius WebSocket Stream Manager
  * 
- * Connects to Helius Enhanced WebSocket to receive real-time PumpFun transactions.
+ * Connects to Helius WebSocket to receive real-time PumpFun transactions.
  * Parses trades directly from logs to avoid RPC calls (saves credits!).
  */
 
 import WebSocket from 'ws';
 import { PublicKey } from '@solana/web3.js';
-import { updateCandles, setSolPrice } from './candle-engine';
-import { addTrade } from './trade-store';
+// Use renamed imports to avoid Nuxt auto-import conflicts
+import { 
+  updateCandles as candleEngineUpdate, 
+  setSolPrice as candleEngineSetSolPrice 
+} from './candle-engine';
+import { addTrade as tradeStoreAdd } from './trade-store';
 import { PUMPFUN_PROGRAM_ID } from './pumpfun-idl';
 import type { PumpFunTrade } from './pumpfun-parser';
 
@@ -83,6 +87,11 @@ export function startStream(): void {
 
   isRunning = true;
   stats.startedAt = Date.now();
+  stats.tradesProcessed = 0;
+  stats.parsedFromLogs = 0;
+  stats.parseFailures = 0;
+  stats.errors = 0;
+  stats.reconnects = 0;
   
   connect();
   startSolPriceUpdater();
@@ -131,7 +140,6 @@ function connect(): void {
       console.log('[HeliusStream] WebSocket connected');
       stats.connected = true;
       stats.lastMessage = Date.now();
-      stats.reconnects = 0;
       
       subscribeToProgram();
       startHeartbeat();
@@ -241,7 +249,7 @@ function handleMessage(data: WebSocket.Data): void {
       }
     }
   } catch (e) {
-    // Not all messages are JSON
+    // Not all messages are JSON - that's okay
   }
 }
 
@@ -250,13 +258,11 @@ function handleMessage(data: WebSocket.Data): void {
 function parseAllTradesFromLogs(signature: string, logs: string[]): PumpFunTrade[] {
   const trades: PumpFunTrade[] = [];
   
-  // Find all "Program data:" entries that could be trade events
   for (let i = 0; i < logs.length; i++) {
     const log = logs[i];
     
     if (!log.includes('Program data:')) continue;
     
-    // Extract base64 data
     const base64Match = log.match(/Program data: (.+)/);
     if (!base64Match) continue;
     
@@ -268,7 +274,6 @@ function parseAllTradesFromLogs(signature: string, logs: string[]): PumpFunTrade
         trades.push(trade);
       }
     } catch (e) {
-      // Not a trade event, skip
       stats.parseFailures++;
     }
   }
@@ -281,18 +286,13 @@ function decodeTradeEvent(signature: string, base64Data: string): PumpFunTrade |
     const buffer = Buffer.from(base64Data, 'base64');
     
     // PumpFun TradeEvent is 113+ bytes
-    // Skip events that are too small
     if (buffer.length < 105) {
       return null;
     }
     
-    // Check discriminator for TradeEvent
-    // TradeEvent discriminator: [189, 219, 127, 211, 78, 230, 97, 238]
-    // But it can vary, so let's just try to parse and validate
-    
     let offset = 8; // Skip 8-byte discriminator
     
-    // Read mint (32 bytes) - must be a valid public key
+    // Read mint (32 bytes)
     if (offset + 32 > buffer.length) return null;
     const mintBytes = buffer.subarray(offset, offset + 32);
     let mint: string;
@@ -309,7 +309,7 @@ function decodeTradeEvent(signature: string, base64Data: string): PumpFunTrade |
     const solAmount = Number(solAmountRaw) / 1e9;
     offset += 8;
     
-    // Validate solAmount is reasonable (between 0.0001 and 10000 SOL)
+    // Validate solAmount is reasonable
     if (solAmount < 0.0001 || solAmount > 10000) {
       return null;
     }
@@ -341,18 +341,16 @@ function decodeTradeEvent(signature: string, base64Data: string): PumpFunTrade |
     const timestampRaw = buffer.readBigInt64LE(offset);
     let timestamp = Number(timestampRaw) * 1000;
     
-    // Validate timestamp is reasonable (after 2020, before 2030)
+    // Validate timestamp
     const now = Date.now();
     if (timestamp < 1577836800000 || timestamp > now + 86400000) {
-      timestamp = now; // Use current time if invalid
+      timestamp = now;
     }
     offset += 8;
     
     // Read virtual reserves for price calculation
     if (offset + 16 > buffer.length) {
-      // Calculate price from trade amounts if reserves not available
       const price = tokenAmount > 0 ? solAmount / tokenAmount : 0;
-      
       if (price <= 0) return null;
       
       return {
@@ -372,7 +370,7 @@ function decodeTradeEvent(signature: string, base64Data: string): PumpFunTrade |
     offset += 8;
     const virtualTokenReserves = Number(buffer.readBigUInt64LE(offset));
     
-    // Calculate price from reserves (more accurate for bonding curve)
+    // Calculate price from reserves
     const price = virtualTokenReserves > 0 
       ? virtualSolReserves / virtualTokenReserves 
       : (tokenAmount > 0 ? solAmount / tokenAmount : 0);
@@ -398,8 +396,8 @@ function decodeTradeEvent(signature: string, base64Data: string): PumpFunTrade |
 // === PROCESS TRADE ===
 
 function processTrade(trade: PumpFunTrade): void {
-  // Update candle engine
-  updateCandles(
+  // Update candle engine (using renamed import)
+  candleEngineUpdate(
     trade.mint,
     trade.price,
     trade.solAmount,
@@ -407,17 +405,19 @@ function processTrade(trade: PumpFunTrade): void {
     trade.timestamp
   );
 
-  // Store trade
-  addTrade(trade);
+  // Store trade (using renamed import)
+  tradeStoreAdd(trade);
 
   stats.tradesProcessed++;
   
-  // Log every 100 trades with details
+  // Log every 100 trades
   if (stats.tradesProcessed % 100 === 0) {
-    console.log(`[HeliusStream] 📊 ${stats.tradesProcessed} trades | ` +
+    console.log(
+      `[HeliusStream] 📊 ${stats.tradesProcessed} trades | ` +
       `Parsed: ${stats.parsedFromLogs} | ` +
       `Failures: ${stats.parseFailures} | ` +
-      `Last: ${trade.mint.slice(0, 8)}... ${trade.isBuy ? 'BUY' : 'SELL'} ${trade.solAmount.toFixed(3)} SOL`);
+      `Last: ${trade.mint.slice(0, 8)}... ${trade.isBuy ? 'BUY' : 'SELL'} ${trade.solAmount.toFixed(3)} SOL`
+    );
   }
 }
 
@@ -435,7 +435,8 @@ async function updateSolPrice(): Promise<void> {
     const price = data.data?.['So11111111111111111111111111111111111111112']?.price;
     
     if (price && price > 0) {
-      setSolPrice(parseFloat(price));
+      // Use renamed import
+      candleEngineSetSolPrice(parseFloat(price));
       console.log(`[HeliusStream] 💰 SOL: $${parseFloat(price).toFixed(2)}`);
     }
   } catch (e: any) {

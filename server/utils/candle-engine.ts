@@ -5,15 +5,28 @@
  */
 
 // === CONFIGURATION ===
-const MAX_TOKENS = 500;           // Max tokens to track
-const MAX_1S_CANDLES = 120;       // 2 minutes of 1s candles
-const MAX_1M_CANDLES = 60;        // 1 hour of 1m candles
-const MAX_5M_CANDLES = 48;        // 4 hours of 5m candles
-const MAX_30M_CANDLES = 48;       // 24 hours of 30m candles
-const MAX_1H_CANDLES = 48;        // 48 hours of 1h candles
-const MAX_24H_CANDLES = 14;       // 2 weeks of 24h candles
+const MAX_TOKENS = 500;
+const MAX_1S_CANDLES = 120;
+const MAX_1M_CANDLES = 60;
+const MAX_5M_CANDLES = 48;
+const MAX_30M_CANDLES = 48;
+const MAX_1H_CANDLES = 48;
+const MAX_24H_CANDLES = 14;
 
-const INACTIVE_CLEANUP_MS = 10 * 60 * 1000; // Remove tokens inactive for 10 min
+const INACTIVE_CLEANUP_MS = 10 * 60 * 1000;
+
+// === SOL PRICE ===
+let solPriceUsd = 150;
+
+export function setSolPrice(price: number): void {
+  if (price > 0) {
+    solPriceUsd = price;
+  }
+}
+
+export function getSolPrice(): number {
+  return solPriceUsd;
+}
 
 // === TYPES ===
 interface Candle {
@@ -69,7 +82,7 @@ const MAX_CANDLES: Record<Timeframe, number> = {
 
 // === STORAGE ===
 const tokenCandles = new Map<string, TokenCandles>();
-const tokenLastActivity = new Map<string, number>(); // Track last activity time
+const tokenLastActivity = new Map<string, number>();
 
 // === MAIN FUNCTIONS ===
 
@@ -82,14 +95,10 @@ export function updateCandles(
 ): void {
   const now = Date.now();
   
-  // Initialize token if needed
   if (!tokenCandles.has(mint)) {
-    // Check if we're at max capacity
     if (tokenCandles.size >= MAX_TOKENS) {
-      // Remove oldest inactive token
       removeOldestInactiveToken();
     }
-    
     tokenCandles.set(mint, createEmptyTokenCandles());
   }
   
@@ -98,7 +107,6 @@ export function updateCandles(
   candles.lastPrice = price;
   tokenLastActivity.set(mint, now);
   
-  // Update each timeframe
   const timeframes: Timeframe[] = ['1s', '1m', '5m', '30m', '1h', '24h'];
   
   for (const tf of timeframes) {
@@ -119,12 +127,9 @@ function updateTimeframe(
   
   let current = candles.current[timeframe];
   
-  // Check if we need to close the current candle and start a new one
   if (current && current.timestamp !== periodStart) {
-    // Close current candle
     candles[timeframe].unshift(current);
     
-    // Trim to max candles (memory limit!)
     const maxCandles = MAX_CANDLES[timeframe];
     if (candles[timeframe].length > maxCandles) {
       candles[timeframe] = candles[timeframe].slice(0, maxCandles);
@@ -133,7 +138,6 @@ function updateTimeframe(
     current = null;
   }
   
-  // Create new candle if needed
   if (!current) {
     current = {
       open: price,
@@ -149,7 +153,6 @@ function updateTimeframe(
     candles.current[timeframe] = current;
   }
   
-  // Update candle
   current.high = Math.max(current.high, price);
   current.low = Math.min(current.low, price);
   current.close = price;
@@ -188,7 +191,6 @@ function removeOldestInactiveToken(): void {
   let oldestToken: string | null = null;
   let oldestTime = now;
   
-  // Find the token with oldest activity
   for (const [mint, lastActive] of tokenLastActivity.entries()) {
     if (lastActive < oldestTime) {
       oldestTime = lastActive;
@@ -199,11 +201,10 @@ function removeOldestInactiveToken(): void {
   if (oldestToken) {
     tokenCandles.delete(oldestToken);
     tokenLastActivity.delete(oldestToken);
-    console.log(`[CandleEngine] Evicted inactive token: ${oldestToken.slice(0, 8)}... (inactive for ${Math.round((now - oldestTime) / 1000)}s)`);
+    console.log(`[CandleEngine] Evicted: ${oldestToken.slice(0, 8)}...`);
   }
 }
 
-// Periodic cleanup of inactive tokens
 export function cleanupInactiveTokens(): number {
   const now = Date.now();
   let removed = 0;
@@ -230,14 +231,8 @@ export function getCandles(mint: string, timeframe: Timeframe): Candle[] {
   if (!candles) return [];
   
   const result: Candle[] = [];
-  
-  // Add current candle first (if exists)
   const current = candles.current[timeframe];
-  if (current) {
-    result.push(current);
-  }
-  
-  // Add historical candles
+  if (current) result.push(current);
   result.push(...candles[timeframe]);
   
   return result;
@@ -267,61 +262,40 @@ export function getEngineStats(): {
   totalTokens: number;
   totalCandles: number;
   memoryUsage: string;
-  oldestToken: { mint: string; inactiveSeconds: number } | null;
 } {
   let totalCandles = 0;
-  const now = Date.now();
-  let oldestMint = '';
-  let oldestTime = now;
   
-  for (const [mint, candles] of tokenCandles.entries()) {
+  for (const candles of tokenCandles.values()) {
     totalCandles += candles['1s'].length + (candles.current['1s'] ? 1 : 0);
     totalCandles += candles['1m'].length + (candles.current['1m'] ? 1 : 0);
     totalCandles += candles['5m'].length + (candles.current['5m'] ? 1 : 0);
     totalCandles += candles['30m'].length + (candles.current['30m'] ? 1 : 0);
     totalCandles += candles['1h'].length + (candles.current['1h'] ? 1 : 0);
     totalCandles += candles['24h'].length + (candles.current['24h'] ? 1 : 0);
-    
-    const lastActive = tokenLastActivity.get(mint) || now;
-    if (lastActive < oldestTime) {
-      oldestTime = lastActive;
-      oldestMint = mint;
-    }
   }
   
-  // Estimate memory usage (rough)
-  const bytesPerCandle = 100; // Approximate
-  const memoryBytes = totalCandles * bytesPerCandle;
-  const memoryMB = (memoryBytes / (1024 * 1024)).toFixed(2);
+  const memoryMB = ((totalCandles * 100) / (1024 * 1024)).toFixed(2);
   
   return {
     totalTokens: tokenCandles.size,
     totalCandles,
     memoryUsage: `~${memoryMB} MB`,
-    oldestToken: oldestMint ? {
-      mint: oldestMint,
-      inactiveSeconds: Math.round((now - oldestTime) / 1000),
-    } : null,
   };
 }
 
-// === STATS COMPUTATION ===
-
-export function computeTokenStats(mint: string, solPrice: number): any | null {
+export function computeTokenStats(mint: string): any | null {
   const candles = tokenCandles.get(mint);
   if (!candles) return null;
   
   const price = candles.lastPrice;
   if (!price) return null;
   
-  const priceUsd = price * solPrice;
+  const priceUsd = price * solPriceUsd;
   
-  // Get candles for calculations
   const candles1m = getCandles(mint, '1m');
   const candles5m = getCandles(mint, '5m');
   const candles1h = getCandles(mint, '1h');
   
-  // Price changes
   const priceChange1m = candles1m.length >= 2 
     ? ((price - candles1m[1].open) / candles1m[1].open) * 100 
     : 0;
@@ -334,7 +308,6 @@ export function computeTokenStats(mint: string, solPrice: number): any | null {
     ? ((price - candles1h[1].open) / candles1h[1].open) * 100
     : 0;
   
-  // Volume and transactions
   const volume1m = candles1m[0]?.volume || 0;
   const volume5m = candles5m.slice(0, 5).reduce((sum, c) => sum + c.volume, 0);
   
@@ -361,7 +334,9 @@ export function computeTokenStats(mint: string, solPrice: number): any | null {
   };
 }
 
-// Start periodic cleanup
-setInterval(() => {
-  cleanupInactiveTokens();
-}, 60_000); // Every minute
+// === CLEANUP FUNCTION FOR PLUGIN ===
+export function cleanupCandleEngine(): void {
+  tokenCandles.clear();
+  tokenLastActivity.clear();
+  console.log('[CandleEngine] Cleaned up all data');
+}
