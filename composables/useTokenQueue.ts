@@ -134,12 +134,17 @@ export function useTokenQueue() {
   // === QUEUE MANAGEMENT (simplified - no rate limiting needed!) ===
   const addToQueue = async (
     address: string,
-    _priority: 'critical' | 'high' | 'normal' | 'low' = 'normal'
+    priority: 'critical' | 'high' | 'normal' | 'low' = 'normal'
   ): Promise<StreamTokenData | null> => {
-    // Check cache first
-    const cached = getCachedData(address);
-    if (cached) {
-      return cached;
+    // CRITICAL: Bypass cache for active trades to get real-time prices
+    const bypassCache = priority === 'critical';
+
+    // Check cache first (unless critical priority)
+    if (!bypassCache) {
+      const cached = getCachedData(address);
+      if (cached) {
+        return cached;
+      }
     }
 
     const data = await fetchTokenData(address);
@@ -152,21 +157,29 @@ export function useTokenQueue() {
   // === BATCH FETCH ===
   const addBatchToQueue = async (
     addresses: string[],
-    _priority: 'critical' | 'high' | 'normal' | 'low' = 'normal'
+    priority: 'critical' | 'high' | 'normal' | 'low' = 'normal'
   ): Promise<Map<string, StreamTokenData | null>> => {
     const results = new Map<string, StreamTokenData | null>();
-    
-    // Check cache first
+
+    // CRITICAL: Bypass cache for active trades to get real-time prices
+    const bypassCache = priority === 'critical';
+
+    // Check cache first (unless critical priority)
     const uncached: string[] = [];
-    for (const addr of addresses) {
-      const cached = getCachedData(addr);
-      if (cached) {
-        results.set(addr, cached);
-      } else {
-        uncached.push(addr);
+    if (!bypassCache) {
+      for (const addr of addresses) {
+        const cached = getCachedData(addr);
+        if (cached) {
+          results.set(addr, cached);
+        } else {
+          uncached.push(addr);
+        }
       }
+    } else {
+      // Critical priority - fetch all addresses fresh
+      uncached.push(...addresses);
     }
-    
+
     if (uncached.length === 0) {
       return results;
     }

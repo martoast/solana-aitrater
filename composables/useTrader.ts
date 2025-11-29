@@ -828,7 +828,16 @@ export const useTrader = () => {
         const data = freshData[trade.address];
 
         if (data?.price) {
+          const oldPrice = trade.currentPrice;
           trade.currentPrice = data.price;
+
+          // Log price updates for debugging (only if price actually changed)
+          if (oldPrice && Math.abs(trade.currentPrice - oldPrice) > 0.00000001) {
+            const priceChangePercent = ((trade.currentPrice - oldPrice) / oldPrice) * 100;
+            console.log(
+              `[PriceUpdate] ${trade.symbol}: $${oldPrice.toFixed(8)} → $${trade.currentPrice.toFixed(8)} (${priceChangePercent > 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%)`
+            );
+          }
 
           // Calculate current value accounting for fees (if trade has entry fees)
           // This handles both devnet (with fees) and mainnet (without fees)
@@ -934,6 +943,11 @@ export const useTrader = () => {
               toClose.push({ trade, reason: `5m sell pressure` });
             }
           }
+        } else {
+          // Log when we don't get price data for an active trade
+          console.warn(
+            `[PriceUpdate] No price data received for ${trade.symbol} (${trade.address.slice(0, 8)}...)`
+          );
         }
       });
 
