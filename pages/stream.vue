@@ -5,6 +5,8 @@
 
 const recentTrades = ref<any[]>([]);
 const isLoading = ref(true);
+const totalTradesProcessed = ref(0);
+const streamConnected = ref(false);
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -19,6 +21,19 @@ async function fetchTrades() {
     console.error('Failed to fetch trades:', e);
   } finally {
     isLoading.value = false;
+  }
+}
+
+async function fetchStreamStatus() {
+  try {
+    const res = await fetch('/api/stream/status');
+    const json = await res.json();
+    if (json.success && json.data) {
+      totalTradesProcessed.value = json.data.stream.tradesProcessed || 0;
+      streamConnected.value = json.data.stream.connected || false;
+    }
+  } catch (e) {
+    console.error('Failed to fetch stream status:', e);
   }
 }
 
@@ -45,7 +60,11 @@ function truncate(str: string, len = 8): string {
 
 onMounted(() => {
   fetchTrades();
-  refreshTimer = setInterval(fetchTrades, 1000);
+  fetchStreamStatus();
+  refreshTimer = setInterval(() => {
+    fetchTrades();
+    fetchStreamStatus();
+  }, 1000);
 });
 
 onUnmounted(() => {
@@ -60,10 +79,20 @@ onUnmounted(() => {
       <!-- Header -->
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-xl font-bold flex items-center gap-3">
-          <span class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></span>
+          <span
+            class="w-3 h-3 rounded-full"
+            :class="streamConnected ? 'bg-green-500 animate-pulse' : 'bg-red-500'"
+          ></span>
           Live Trades Feed
         </h1>
-        <span class="text-sm text-gray-500">{{ recentTrades.length }} trades</span>
+        <div class="flex items-center gap-4">
+          <span class="text-sm text-gray-400">
+            Showing: <span class="text-white font-semibold">{{ recentTrades.length }}</span>
+          </span>
+          <span class="text-sm text-gray-400">
+            Total Processed: <span class="text-green-400 font-semibold">{{ totalTradesProcessed.toLocaleString() }}</span>
+          </span>
+        </div>
       </div>
       
       <!-- Loading -->

@@ -12,7 +12,12 @@ export interface Trade {
   amount: number;
   timestamp: number;
   status: 'OPEN' | 'CLOSED';
-  
+
+  // Fee Tracking (for devnet simulation)
+  entryFees?: number;      // Fees paid when opening position
+  exitFees?: number;       // Fees paid when closing position
+  totalFees?: number;      // Total fees paid (entry + exit)
+
   // Live Data (Not saved to DB, but useful type definition)
   currentPrice?: number;
   currentValue?: number;

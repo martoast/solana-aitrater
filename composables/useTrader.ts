@@ -226,16 +226,15 @@ export const useTrader = () => {
   // === COMPUTED ===
   const totalPortfolioValue = computed(() => {
     return activeTrades.value.reduce((acc, t) => {
-      const val = t.currentPrice
-        ? (t.amount / t.entryPrice) * t.currentPrice
-        : t.amount;
+      // Use currentValue which already accounts for fees
+      const val = t.currentValue ?? t.amount;
       return acc + val;
     }, 0);
   });
 
   const totalPnL = computed(() => {
-    const invested = activeTrades.value.reduce((acc, t) => acc + t.amount, 0);
-    return totalPortfolioValue.value - invested;
+    // Sum individual P&Ls which already account for fees
+    return activeTrades.value.reduce((acc: number, t: Trade) => acc + (t.pnl ?? 0), 0);
   });
 
   const historyStats = computed(() => {
@@ -830,9 +829,32 @@ export const useTrader = () => {
 
         if (data?.price) {
           trade.currentPrice = data.price;
-          trade.currentValue =
-            (trade.amount / trade.entryPrice) * trade.currentPrice;
-          trade.pnl = trade.currentValue - trade.amount;
+
+          // Calculate current value accounting for fees (if trade has entry fees)
+          // This handles both devnet (with fees) and mainnet (without fees)
+          const entryFees = trade.entryFees || 0;
+          const hasEntryFees = entryFees > 0;
+
+          if (hasEntryFees) {
+            // Token quantity was purchased with net amount after fees
+            const netEntryAmount = trade.amount - entryFees;
+            const tokenQuantity = netEntryAmount / trade.entryPrice;
+            const grossCurrentValue = tokenQuantity * trade.currentPrice;
+
+            // Estimate exit fees (will be applied when actually selling)
+            // For display purposes, we estimate the net proceeds if sold now
+            const estimatedExitFees = grossCurrentValue * 0.01125 + 0.001; // 1.125% + network fee
+            trade.currentValue = grossCurrentValue - estimatedExitFees;
+
+            // P&L is net proceeds minus original investment
+            trade.pnl = trade.currentValue - trade.amount;
+          } else {
+            // No fees (mainnet or old trades before fee implementation)
+            trade.currentValue =
+              (trade.amount / trade.entryPrice) * trade.currentPrice;
+            trade.pnl = trade.currentValue - trade.amount;
+          }
+
           trade.pnlPercent =
             ((trade.currentPrice - trade.entryPrice) / trade.entryPrice) * 100;
           trade.holdTimeSeconds = Math.floor((now - trade.timestamp) / 1000);
